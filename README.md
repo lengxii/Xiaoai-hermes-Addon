@@ -163,7 +163,7 @@ openclaw logs --limit 260 --plain | tail -n 260
 </details>
 
 ## 本人测试环境
-- 阿里云轻量应用服务器2C2G
+- 阿里云轻量应用服务器2C2G (Debian)
 - 小爱音箱Play增强版 (L05C)
 - OpenClaw v2026.4.1
 
