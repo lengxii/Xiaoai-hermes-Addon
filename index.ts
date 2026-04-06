@@ -6,7 +6,6 @@ const pluginEntry = {
     register(api: any) {
         const plugin = createXiaoaiCloudPlugin(api);
         plugin.registerTools();
-        plugin.start();
         api.registerService({
             id: "xiaoai-cloud-listener",
             start: async (ctx: any) => {
