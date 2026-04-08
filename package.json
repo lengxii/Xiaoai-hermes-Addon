@@ -16,10 +16,13 @@
     "assets/fonts/noto-sans-sc/wght.css",
     "assets/fonts/noto-sans-sc/LICENSE",
     "scripts/configure-openclaw-install.mjs",
+    "scripts/configure-openclaw-uninstall.mjs",
     "openclaw.plugin.json",
     "README.md",
     "install.sh",
-    "install.cmd"
+    "install.cmd",
+    "uninstall.sh",
+    "uninstall.cmd"
   ],
   "openclaw": {
     "extensions": [

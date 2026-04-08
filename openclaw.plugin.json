@@ -11,6 +11,9 @@
     "publicBaseUrl": {
       "label": "Public Base URL"
     },
+    "audioPublicBaseUrl": {
+      "label": "Audio Public Base URL"
+    },
     "openclawTo": {
       "label": "OpenClaw Target"
     }
@@ -88,6 +91,10 @@
         "type": "string",
         "description": "用户手机可访问的插件基地址，例如 https://example.com/api/xiaoai-cloud 或 http://192.168.1.10:17890。留空时插件会优先根据当前 OpenClaw gateway 配置自动推导。"
       },
+      "audioPublicBaseUrl": {
+        "type": "string",
+        "description": "可选。专门给小爱音箱拉取 TTS / relay 音频用的基地址，例如 http://192.168.1.10:18798/api/xiaoai-cloud。它只影响音频播放链路，不影响控制台登录链接。留空时插件会优先用 publicBaseUrl，其次自动尝试 OpenClaw gateway 的公网地址；如果仍然只有 loopback 地址，则会在本地部署场景下自动尝试局域网 IP。"
+      },
       "openclawAgent": {
         "type": "string",
         "description": "强烈建议填写专供小爱语音使用的 OpenClaw agent id，例如 xiaoai。填写后插件会直接把语音投递到这个独立 agent，避免和 main 会话争锁。"
@@ -123,6 +130,10 @@
       "dialogWindowSeconds": {
         "type": "integer",
         "description": "唤醒模式下，OpenClaw 主动播报后的免唤醒对话窗口时长，单位秒，默认 30。"
+      },
+      "audioTailPaddingMs": {
+        "type": "integer",
+        "description": "音频播放链路的尾部留白空余延迟，单位毫秒，默认 1500。会同时影响 relay/TTS 音频补白和二次播放拦截时机。"
       },
       "voiceContextMaxTurns": {
         "type": "integer",

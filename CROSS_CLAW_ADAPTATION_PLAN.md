@@ -34,7 +34,7 @@
 - 状态目录和配置文件解析依赖 `OPENCLAW_HOME`、`OPENCLAW_STATE_DIR`、`OPENCLAW_CONFIG_PATH`、`openclaw.json`。
 - 通知回推依赖 `openclaw message send --channel --target --message`。
 - agent 调用依赖 OpenClaw Gateway WebSocket、`agent.wait`、`/v1/responses`、`model: openclaw:<agentId>`、`user`、`x-openclaw-agent-id`、`x-openclaw-session-key`。
-- 安装脚本会直接修改 OpenClaw 的全局配置和 agent 列表。
+- 安装脚本会直接修改 OpenClaw 的全局配置和 agent 列表，并保证专属 `xiaoai` agent 不会抢占现有默认入口。
 
 因此，当前实现不能直接安装到 `ZeroClaw` 或 `PicoClaw`。
 
@@ -573,6 +573,7 @@ src/
 - 极短音频的 guard finish 应尽量贴近理论 deadline，不能再晚一个完整状态轮询窗口
 - deadline fast path 不能被额外的状态预读、重复 pause、同步 loop 恢复拖慢
 - 不要把 `relay hit` 单独提升为跨宿主通用的“起播成功”信号；它最多只能作为辅证，仍然需要至少一份宿主播放状态 / 队列状态确认
+- deadline lead 不能写死为单一常量；至少要按当前设备最近观测到的 `status probe / playback detect / pause-stop settle` 延迟做自适应
 
 这两条约束应该放在“通用音频播放管线”里统一保证，而不是留给某个宿主单独兜底。
 

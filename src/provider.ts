@@ -2,6 +2,7 @@ import path from "path";
 import { mkdir, readFile, readdir, stat, unlink, utimes, writeFile } from "fs/promises";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { execFile, spawn } from "child_process";
+import { networkInterfaces } from "os";
 import { fileURLToPath } from "url";
 import JSON5 from "json5";
 import { renderConsoleAccessPage, renderConsolePage } from "./console-page.js";
@@ -19,11 +20,14 @@ import {
     LoginSessionSeed,
     LoginSubmission,
     LoginSuccessPayload,
+    VerificationPageOpenPayload,
     LoginVerificationPayload,
     VerificationTicketSubmission,
 } from "./auth-portal.js";
 import {
     ConsoleEventEntry,
+    PersistedAudioCalibrationSummary,
+    PersistedSpeakerAudioLatencyProfile,
     PersistedSpeakerMuteState,
     defaultStateStorePath,
     defaultConsoleStatePath,
@@ -42,6 +46,7 @@ import {
     XiaomiAccountClient,
     XiaomiPythonRuntimeStatus,
     XiaomiSid,
+    XiaomiVerificationMethod,
     XiaomiVerificationRequiredError,
     XiaomiVerificationState,
     defaultTokenStorePath,
@@ -71,9 +76,11 @@ interface PluginConfig {
     authPort: number;
     authRoutePath: string;
     publicBaseUrl?: string;
+    audioPublicBaseUrl?: string;
     openclawAgent?: string;
     openclawChannel: string;
     openclawTo?: string;
+    openclawNotificationsDisabled: boolean;
     openclawCliPath: string;
     openclawThinkingOff: boolean;
     openclawForceNonStreaming: boolean;
@@ -84,6 +91,7 @@ interface PluginConfig {
     voiceContextMaxChars: number;
     wakeWordPattern: string;
     dialogWindowSeconds: number;
+    audioTailPaddingMs: number;
 }
 
 interface DeviceContext {
@@ -167,6 +175,7 @@ interface ConsoleBootstrapPayload {
     lastConversationAt?: string;
     lastConversationQuery?: string;
     lastError?: string;
+    lastErrorTransient?: boolean;
     consoleUrl?: string;
     loginUrl?: string;
     loginHint?: string;
@@ -193,6 +202,24 @@ interface ConsoleBootstrapPayload {
         positionSeconds?: number;
         durationSeconds?: number;
     } | null;
+    openclawRoute?: ConsoleOpenclawRouteState;
+    openclawWorkspaceFiles?: ConsoleOpenclawWorkspaceState;
+    audioCalibration?: ConsoleAudioCalibrationState;
+}
+
+interface ConsoleSpeakerAudioLatencyProfile {
+    statusProbeEstimateMs?: number;
+    pauseSettleEstimateMs?: number;
+    stopSettleEstimateMs?: number;
+    playbackDetectEstimateMs?: number;
+    updatedAt?: string;
+}
+
+interface ConsoleAudioCalibrationState {
+    running: boolean;
+    tailPaddingMs: number;
+    currentProfile?: ConsoleSpeakerAudioLatencyProfile;
+    lastRun?: PersistedAudioCalibrationSummary;
 }
 
 interface ConsoleOpenclawModelOption {
@@ -209,6 +236,47 @@ interface OpenclawAgentModelState {
     model?: string;
     systemPrompt?: string;
     models: ConsoleOpenclawModelOption[];
+}
+
+interface ConsoleOpenclawRouteChannelOption {
+    id: string;
+    label: string;
+    configured: boolean;
+    targets: string[];
+}
+
+interface ConsoleOpenclawRouteState {
+    agentId: string;
+    channel: string;
+    target?: string;
+    enabled: boolean;
+    channels: ConsoleOpenclawRouteChannelOption[];
+}
+
+type OpenclawWorkspaceFileId =
+    | "agents"
+    | "identity"
+    | "tools"
+    | "heartbeat"
+    | "boot"
+    | "memory";
+
+interface ConsoleOpenclawWorkspaceFileState {
+    id: OpenclawWorkspaceFileId;
+    filename: string;
+    label: string;
+    description: string;
+    enabled: boolean;
+    customized: boolean;
+    defaultEnabled: boolean;
+    disableAllowed: boolean;
+    defaultContent: string;
+    content: string;
+}
+
+interface ConsoleOpenclawWorkspaceState {
+    agentId: string;
+    files: ConsoleOpenclawWorkspaceFileState[];
 }
 
 interface ConsoleConversationEntry {
@@ -271,6 +339,7 @@ interface RecentSelfTriggeredQuery {
 interface AudioRelayEntry {
     id: string;
     sourceUrl?: string;
+    localSourceUrl?: string;
     extension: string;
     transcodeToMp3?: boolean;
     buffer?: Buffer;
@@ -359,6 +428,14 @@ interface ExternalAudioLoopGuard {
     lastSnapshotAtMs?: number;
 }
 
+interface SpeakerAudioLatencyProfile {
+    statusProbeEstimateMs?: number;
+    pauseSettleEstimateMs?: number;
+    stopSettleEstimateMs?: number;
+    playbackDetectEstimateMs?: number;
+    updatedAtMs: number;
+}
+
 const DEFAULT_TRANSITION_PHRASES = ["让我想想", "嗯，稍等一下", "好的，我想想"];
 const DEFAULT_WAKE_WORD_PATTERN = "小[虾瞎侠下夏霞]";
 const DEFAULT_DIALOG_WINDOW_SECONDS = 30;
@@ -374,11 +451,77 @@ const MAX_TRANSITION_PHRASE_CHARS = 40;
 const OPENCLAW_AGENT_PROMPT_FILENAME = "AGENTS.md";
 const DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT =
     "你正在通过真实小爱音箱实时语音对话。目标是尽快开口回答。默认先直接调用 xiaoai_speak，回答尽量简短；如果你已经拿到了可直接播放的音频 URL，也可以按 OpenClaw 官方 payload 格式直接返回 mediaUrl/mediaUrls，插件会自动交给小爱播放。除非确实需要别的工具，否则不要先输出文字。不要输出执行状态、工具回执或流程确认，只给用户真正需要听到的内容。如果下方附带最近几轮对话上下文，它仅用于保持连续语境；如果与当前用户最新输入冲突，以当前用户最新输入为准。";
+const OPENCLAW_WORKSPACE_FILE_DEFINITIONS: Array<{
+    id: OpenclawWorkspaceFileId;
+    filename: string;
+    label: string;
+    description: string;
+    defaultContent: string;
+    defaultEnabled: boolean;
+    disableAllowed: boolean;
+}> = [
+    {
+        id: "agents",
+        filename: OPENCLAW_AGENT_PROMPT_FILENAME,
+        label: "系统提示词",
+        description:
+            "这里会直接写入专属 workspace 的 AGENTS.md，由 OpenClaw bootstrap 机制在每轮自动注入，留空保存会恢复默认内容。",
+        defaultContent: DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
+        defaultEnabled: true,
+        disableAllowed: false,
+    },
+    {
+        id: "identity",
+        filename: "IDENTITY.md",
+        label: "身份提示",
+        description: "补充这个专属 agent 的身份设定。",
+        defaultContent: "身份：小爱语音代理。",
+        defaultEnabled: true,
+        disableAllowed: true,
+    },
+    {
+        id: "tools",
+        filename: "TOOLS.md",
+        label: "工具约束",
+        description: "约束这个专属 agent 在 workspace 里优先使用哪些工具。",
+        defaultContent: "只使用 xiaoai_* 工具处理音箱相关任务。",
+        defaultEnabled: true,
+        disableAllowed: true,
+    },
+    {
+        id: "heartbeat",
+        filename: "HEARTBEAT.md",
+        label: "心跳说明",
+        description: "告诉 OpenClaw 这个 workspace 不需要额外的心跳动作。",
+        defaultContent: "无需执行心跳任务。",
+        defaultEnabled: true,
+        disableAllowed: true,
+    },
+    {
+        id: "boot",
+        filename: "BOOT.md",
+        label: "启动检查",
+        description: "只有你确实需要 boot check 指令时才建议启用；默认保持禁用。",
+        defaultContent: "无需启动动作。",
+        defaultEnabled: false,
+        disableAllowed: true,
+    },
+    {
+        id: "memory",
+        filename: "MEMORY.md",
+        label: "长期记忆",
+        description: "存放这个专属 agent 的少量长期偏好或常驻记忆。",
+        defaultContent: "仅保留少量长期偏好。",
+        defaultEnabled: true,
+        disableAllowed: true,
+    },
+];
 const CLOUD_LOGIN_SIDS: XiaomiSid[] = ["xiaomiio", "micoapi"];
 const PAUSE_RETRY_DELAYS_MS = [0, 120];
 const SPEAKER_COMMAND_VERIFY_DELAYS_MS = [80, 160, 320, 600, 900];
 const SPEAKER_COMMAND_FAST_VERIFY_DELAYS_MS = [40, 80, 140];
 const SPEAKER_MUTE_READBACK_VERIFY_DELAYS_MS = [120, 360, 900];
+const SOFT_VOLUME_MUTE_READBACK_MAX_PERCENT = 5;
 const SOFT_VOLUME_UNMUTE_SETTLE_PROBE_DELAYS_MS = [1500, 3500, 6500];
 const VOLUME_CACHE_GRACE_MS = 3500;
 const CONSOLE_COOKIE_NAME = "xiaoai_console_token";
@@ -405,7 +548,11 @@ const MAX_TTS_BRIDGE_CACHE_FILES = 32;
 const TTS_BRIDGE_CACHE_FORMAT_VERSION = "v3";
 const AUDIO_PLAYBACK_VERIFY_DELAYS_MS = [100, 220, 420, 750];
 const AUDIO_RELAY_MAX_BYTES = 24 * 1024 * 1024;
-const AUDIO_RELAY_TAIL_SILENCE_MS = 1000;
+const DEFAULT_AUDIO_RELAY_TAIL_SILENCE_MS = 1500;
+const MIN_AUDIO_RELAY_TAIL_SILENCE_MS = 0;
+const MAX_AUDIO_RELAY_TAIL_SILENCE_MS = 10_000;
+const AUDIO_CALIBRATION_SAMPLE_DURATIONS_MS = [450, 800, 1200];
+const AUDIO_CALIBRATION_ROUND_SETTLE_MS = 500;
 const AUDIO_PLAYBACK_SKIP_TTL_MS = 10 * 60 * 1000;
 const AUDIO_STANDARDIZE_TIMEOUT_MS = 45_000;
 const EXTERNAL_AUDIO_NON_LOOP_TYPE = 3;
@@ -480,11 +627,14 @@ function safeTokenEquals(expected?: string, candidate?: string) {
     return timingSafeEqual(left, right);
 }
 
-function schemaObject(properties: Record<string, JsonSchema>): JsonSchema {
+function schemaObject(
+    properties: Record<string, JsonSchema>,
+    options?: { required?: string[] }
+): JsonSchema {
     return {
         type: "object",
         properties,
-        required: Object.keys(properties),
+        required: options?.required ?? Object.keys(properties),
         additionalProperties: false,
     };
 }
@@ -545,13 +695,34 @@ async function readJsonBody(request: any): Promise<any> {
     }
 }
 
+function shouldSendCrossOriginOpenerPolicy(response: any) {
+    const request = response?.req;
+    const forwardedProto = readRequestHeader(request, "x-forwarded-proto")?.toLowerCase();
+    const forwardedHost = readRequestHeader(request, "x-forwarded-host");
+    const host = forwardedHost || readRequestHeader(request, "host");
+    const protocol =
+        forwardedProto === "https" || Boolean(request?.socket?.encrypted)
+            ? "https"
+            : "http";
+    if (protocol === "https" || !host) {
+        return true;
+    }
+    try {
+        return isLoopbackHostname(new URL(`${protocol}://${host}`).hostname);
+    } catch {
+        return false;
+    }
+}
+
 function applySecurityHeaders(response: any) {
     response.setHeader("Cache-Control", "no-store, max-age=0");
     response.setHeader("Pragma", "no-cache");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Frame-Options", "DENY");
-    response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    if (shouldSendCrossOriginOpenerPolicy(response)) {
+        response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    }
     response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     response.setHeader("X-Permitted-Cross-Domain-Policies", "none");
     response.setHeader(
@@ -780,6 +951,113 @@ function isPrivateHostname(hostname: string) {
     return false;
 }
 
+function scoreConsoleBaseUrl(value: string) {
+    try {
+        const parsed = new URL(value);
+        const hostname = parsed.hostname.trim().toLowerCase();
+        if (!hostname) {
+            return 0;
+        }
+
+        let score = 0;
+        if (isLoopbackHostname(hostname)) {
+            score += 400;
+        }
+        if (parsed.protocol === "https:") {
+            score += 300;
+        }
+        if (!looksLikeIpHostname(hostname)) {
+            score += 120;
+        }
+        if (!isLoopbackHostname(hostname) && !isPrivateHostname(hostname)) {
+            score += 40;
+        }
+        if (!parsed.port || parsed.port === "80" || parsed.port === "443") {
+            score += 10;
+        }
+        return score;
+    } catch {
+        return 0;
+    }
+}
+
+function sortConsoleBaseUrls(values: string[]) {
+    return values
+        .map((value, index) => ({
+            value,
+            index,
+            score: scoreConsoleBaseUrl(value),
+        }))
+        .sort((left, right) => right.score - left.score || left.index - right.index)
+        .map((item) => item.value);
+}
+
+function isVirtualNetworkInterfaceName(name: string) {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized) {
+        return true;
+    }
+    return /^(?:lo|docker|br-|veth|podman|virbr|tailscale|tun|tap|utun|zt|wg|vboxnet|vmnet)/i.test(
+        normalized
+    );
+}
+
+function readLocalLanIpv4Addresses() {
+    const candidates: Array<{ name: string; address: string; priority: number }> = [];
+    for (const [name, entries] of Object.entries(networkInterfaces())) {
+        const normalizedEntries = Array.isArray(entries)
+            ? (entries as Array<{
+                family?: string | number;
+                internal?: boolean;
+                address?: string;
+            }>)
+            : [];
+        if (normalizedEntries.length === 0 || isVirtualNetworkInterfaceName(name)) {
+            continue;
+        }
+        const normalizedName = name.trim().toLowerCase();
+        const priority = /^(?:en|eth|eno|ens|enp|wlan|wlp|wl|wifi)/i.test(normalizedName)
+            ? 0
+            : 100;
+        for (const entry of normalizedEntries) {
+            const family =
+                typeof entry.family === "string"
+                    ? entry.family
+                    : entry.family === 4
+                        ? "IPv4"
+                        : entry.family === 6
+                            ? "IPv6"
+                            : "";
+            if (family !== "IPv4" || entry.internal) {
+                continue;
+            }
+            const address = readString((entry as any).address);
+            if (
+                !address ||
+                !isPrivateHostname(address) ||
+                address.startsWith("169.254.")
+            ) {
+                continue;
+            }
+            candidates.push({
+                name: normalizedName,
+                address,
+                priority,
+            });
+        }
+    }
+    return uniqueStrings(
+        candidates
+            .sort(
+                (left, right) =>
+                    left.priority - right.priority ||
+                    left.name.localeCompare(right.name) ||
+                    left.address.localeCompare(right.address)
+            )
+            .map((item) => item.address)
+    );
+}
+
 function mediaUrlHostKey(value: string) {
     try {
         return new URL(value).host.toLowerCase() || "unknown";
@@ -947,6 +1225,45 @@ function normalizeOpenclawVoiceSystemPrompt(
         return normalized;
     }
     return fallbackToDefault ? DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT : "";
+}
+
+function findOpenclawWorkspaceFileDefinition(fileRef: any) {
+    const normalized = readString(fileRef)?.toLowerCase();
+    if (!normalized) {
+        return undefined;
+    }
+    return OPENCLAW_WORKSPACE_FILE_DEFINITIONS.find(
+        (item) =>
+            item.id === normalized ||
+            item.filename.toLowerCase() === normalized ||
+            item.label.toLowerCase() === normalized
+    );
+}
+
+function normalizeOpenclawWorkspaceFileContent(
+    definition: {
+        id: OpenclawWorkspaceFileId;
+        defaultContent: string;
+    },
+    value: any,
+    options?: { fallbackToDefault?: boolean }
+) {
+    const fallbackToDefault = options?.fallbackToDefault !== false;
+    if (definition.id === "agents") {
+        return normalizeOpenclawVoiceSystemPrompt(value, {
+            fallbackToDefault,
+        });
+    }
+    const raw = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
+    const normalized = raw
+        ? raw
+              .slice(0, MAX_OPENCLAW_VOICE_SYSTEM_PROMPT_CHARS)
+              .trim()
+        : "";
+    if (normalized) {
+        return normalized;
+    }
+    return fallbackToDefault ? definition.defaultContent : "";
 }
 
 function normalizeTransitionPhrasesInput(
@@ -1140,6 +1457,61 @@ function readStringList(value: any): string[] {
         .filter((item): item is string => Boolean(item));
 }
 
+function formatConsoleOpenclawChannelLabel(channelId: string) {
+    const normalized = readString(channelId)?.toLowerCase() || "";
+    if (!normalized) {
+        return "未命名渠道";
+    }
+
+    const aliasMap: Record<string, string> = {
+        qqbot: "QQ Bot",
+        wecom: "企业微信",
+        telegram: "Telegram",
+        slack: "Slack",
+        discord: "Discord",
+        feishu: "飞书",
+        dingtalk: "钉钉",
+        email: "Email",
+        sms: "SMS",
+        webhook: "Webhook",
+        serverchan: "ServerChan",
+    };
+    if (aliasMap[normalized]) {
+        return aliasMap[normalized];
+    }
+    return normalized
+        .split(/[_-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+}
+
+function collectConfiguredOpenclawChannels(
+    globalConfig: Record<string, any> | undefined
+) {
+    const channelsConfig =
+        globalConfig?.channels && typeof globalConfig.channels === "object"
+            ? globalConfig.channels
+            : undefined;
+    if (!channelsConfig) {
+        return [];
+    }
+
+    return Object.entries(channelsConfig)
+        .filter(([channelId, value]) => {
+            const normalizedChannelId = readString(channelId)?.toLowerCase();
+            return Boolean(
+                normalizedChannelId &&
+                    value &&
+                    typeof value === "object" &&
+                    !Array.isArray(value) &&
+                    readBoolean((value as any).enabled) !== false
+            );
+        })
+        .map(([channelId]) => readString(channelId)?.toLowerCase())
+        .filter((value): value is string => Boolean(value));
+}
+
 function collectOpenclawNotificationTargetsFromNode(
     value: any,
     candidates: Set<string>,
@@ -1211,6 +1583,15 @@ function collectOpenclawNotificationTargets(
     return Array.from(candidates);
 }
 
+function inferConfiguredOpenclawChannel(
+    globalConfig: Record<string, any> | undefined
+) {
+    const configuredChannels = collectConfiguredOpenclawChannels(globalConfig);
+    return configuredChannels.length === 1
+        ? configuredChannels[0]
+        : undefined;
+}
+
 function inferOpenclawNotificationTarget(
     globalConfig: Record<string, any> | undefined,
     channel: string | undefined
@@ -1279,6 +1660,26 @@ function readBoolean(value: any): boolean | undefined {
         }
     }
     return undefined;
+}
+
+function normalizeAudioTailPaddingMs(
+    value: any,
+    fallback = DEFAULT_AUDIO_RELAY_TAIL_SILENCE_MS
+) {
+    const resolvedFallback = clamp(
+        Math.round(Number(fallback) || DEFAULT_AUDIO_RELAY_TAIL_SILENCE_MS),
+        MIN_AUDIO_RELAY_TAIL_SILENCE_MS,
+        MAX_AUDIO_RELAY_TAIL_SILENCE_MS
+    );
+    const parsed = readNumber(value);
+    if (typeof parsed !== "number" || !Number.isFinite(parsed)) {
+        return resolvedFallback;
+    }
+    return clamp(
+        Math.round(parsed),
+        MIN_AUDIO_RELAY_TAIL_SILENCE_MS,
+        MAX_AUDIO_RELAY_TAIL_SILENCE_MS
+    );
 }
 
 function escapeRegexLiteral(value: string) {
@@ -1620,17 +2021,39 @@ async function resolvePluginConfig(
         0,
         MAX_VOICE_CONTEXT_CHARS
     );
+    const audioTailPaddingMs = normalizeAudioTailPaddingMs(
+        readNumber(apiConfig.audioTailPaddingMs) ??
+            readNumber(env.XIAOAI_CLOUD_AUDIO_TAIL_PADDING_MS) ??
+            readNumber(persisted.audioTailPaddingMs)
+    );
+    const explicitOpenclawChannel = pickFirstString(
+        apiConfig.openclawChannel,
+        env.XIAOAI_CLOUD_OPENCLAW_CHANNEL
+    );
+    const explicitOpenclawTo = pickFirstString(
+        apiConfig.openclawTo,
+        env.XIAOAI_CLOUD_OPENCLAW_TO
+    );
+    const inferredOpenclawChannel = inferConfiguredOpenclawChannel(globalConfig);
+    const openclawNotificationsDisabled =
+        readBoolean(apiConfig.openclawNotificationsDisabled) ??
+        readBoolean(env.XIAOAI_CLOUD_OPENCLAW_NOTIFICATIONS_DISABLED) ??
+        (explicitOpenclawTo ? false : readBoolean(persisted.openclawNotificationsDisabled)) ??
+        false;
     const resolvedOpenclawChannel =
         pickFirstString(
-            apiConfig.openclawChannel,
-            env.XIAOAI_CLOUD_OPENCLAW_CHANNEL,
+            explicitOpenclawChannel,
+            persisted.openclawChannel,
+            inferredOpenclawChannel,
             "telegram"
-        ) || "telegram";
+        ) || inferredOpenclawChannel || "telegram";
     const resolvedOpenclawTo =
-        pickFirstString(
-            apiConfig.openclawTo,
-            env.XIAOAI_CLOUD_OPENCLAW_TO
-        ) || inferOpenclawNotificationTarget(globalConfig, resolvedOpenclawChannel);
+        openclawNotificationsDisabled
+            ? undefined
+            : pickFirstString(
+                explicitOpenclawTo,
+                persisted.openclawTo
+            ) || inferOpenclawNotificationTarget(globalConfig, resolvedOpenclawChannel);
 
     return {
         account,
@@ -1703,12 +2126,17 @@ async function resolvePluginConfig(
             apiConfig.publicBaseUrl,
             env.XIAOAI_CLOUD_PUBLIC_BASE_URL
         ),
+        audioPublicBaseUrl: pickFirstString(
+            apiConfig.audioPublicBaseUrl,
+            env.XIAOAI_CLOUD_AUDIO_PUBLIC_BASE_URL
+        ),
         openclawAgent: pickFirstString(
             apiConfig.openclawAgent,
             env.XIAOAI_CLOUD_OPENCLAW_AGENT
         ),
         openclawChannel: resolvedOpenclawChannel,
         openclawTo: resolvedOpenclawTo,
+        openclawNotificationsDisabled,
         openclawCliPath:
             pickFirstString(
                 apiConfig.openclawCliPath,
@@ -1738,6 +2166,7 @@ async function resolvePluginConfig(
             5,
             300
         ),
+        audioTailPaddingMs,
     };
 }
 
@@ -1813,6 +2242,10 @@ class XiaoaiCloudPlugin {
     private readonly audioRelayEntries = new Map<string, AudioRelayEntry>();
     private readonly audioPlaybackCapability = new Map<string, AudioPlaybackCapabilityEntry>();
     private readonly externalAudioLoopGuards = new Map<string, ExternalAudioLoopGuard>();
+    private readonly speakerAudioLatencyProfiles = new Map<string, SpeakerAudioLatencyProfile>();
+    private speakerAudioLatencyProfilesHydrated = false;
+    private audioCalibrationRunning = false;
+    private lastAudioCalibration?: PersistedAudioCalibrationSummary;
     private readonly ttsBridgeInflightAssets = new Map<string, Promise<GeneratedAudioAsset>>();
     private ffmpegAvailable?: boolean;
     private ffmpegAvailabilityProbe?: Promise<boolean>;
@@ -2066,6 +2499,224 @@ class XiaoaiCloudPlugin {
         }
     }
 
+    private normalizeSpeakerAudioLatencyProfile(
+        value: any
+    ): SpeakerAudioLatencyProfile | undefined {
+        if (!value || typeof value !== "object") {
+            return undefined;
+        }
+        const next: SpeakerAudioLatencyProfile = {
+            updatedAtMs: Math.max(
+                0,
+                Math.round(readNumber(value.updatedAtMs) || Date.now())
+            ),
+        };
+        let hasEstimate = false;
+        ([
+            "statusProbeEstimateMs",
+            "pauseSettleEstimateMs",
+            "stopSettleEstimateMs",
+            "playbackDetectEstimateMs",
+        ] as const).forEach((key) => {
+            const estimate = readNumber(value[key]);
+            if (
+                typeof estimate === "number" &&
+                Number.isFinite(estimate) &&
+                estimate > 0
+            ) {
+                next[key] = clamp(Math.round(estimate), 1, 10_000);
+                hasEstimate = true;
+            }
+        });
+        return hasEstimate ? next : undefined;
+    }
+
+    private serializeSpeakerAudioLatencyProfileForPersistence(
+        profile?: SpeakerAudioLatencyProfile | null
+    ): PersistedSpeakerAudioLatencyProfile | undefined {
+        const normalized = this.normalizeSpeakerAudioLatencyProfile(profile);
+        if (!normalized) {
+            return undefined;
+        }
+        return {
+            statusProbeEstimateMs: normalized.statusProbeEstimateMs,
+            pauseSettleEstimateMs: normalized.pauseSettleEstimateMs,
+            stopSettleEstimateMs: normalized.stopSettleEstimateMs,
+            playbackDetectEstimateMs: normalized.playbackDetectEstimateMs,
+            updatedAtMs: normalized.updatedAtMs,
+        };
+    }
+
+    private buildConsoleSpeakerAudioLatencyProfile(
+        profile?: SpeakerAudioLatencyProfile | null
+    ): ConsoleSpeakerAudioLatencyProfile | undefined {
+        const normalized = this.normalizeSpeakerAudioLatencyProfile(profile);
+        if (!normalized) {
+            return undefined;
+        }
+        return {
+            statusProbeEstimateMs: normalized.statusProbeEstimateMs,
+            pauseSettleEstimateMs: normalized.pauseSettleEstimateMs,
+            stopSettleEstimateMs: normalized.stopSettleEstimateMs,
+            playbackDetectEstimateMs: normalized.playbackDetectEstimateMs,
+            updatedAt:
+                normalized.updatedAtMs > 0
+                    ? new Date(normalized.updatedAtMs).toISOString()
+                    : undefined,
+        };
+    }
+
+    private serializeSpeakerAudioLatencyProfilesForPersistence() {
+        const entries = Array.from(this.speakerAudioLatencyProfiles.entries())
+            .map(([deviceId, profile]) => {
+                const normalizedDeviceId = readString(deviceId);
+                const normalizedProfile =
+                    this.serializeSpeakerAudioLatencyProfileForPersistence(profile);
+                if (!normalizedDeviceId || !normalizedProfile) {
+                    return undefined;
+                }
+                return [normalizedDeviceId, normalizedProfile] as const;
+            })
+            .filter(Boolean) as Array<
+            readonly [string, PersistedSpeakerAudioLatencyProfile]
+        >;
+        return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+    }
+
+    private normalizePersistedAudioCalibrationSummary(
+        value: any
+    ): PersistedAudioCalibrationSummary | undefined {
+        if (!value || typeof value !== "object") {
+            return undefined;
+        }
+        const latencyProfile = this.serializeSpeakerAudioLatencyProfileForPersistence(
+            value.latencyProfile
+        );
+        const rounds = readNumber(value.rounds);
+        const successCount = readNumber(value.successCount);
+        const failureCount = readNumber(value.failureCount);
+        const tailPaddingMs = readNumber(value.tailPaddingMs);
+        const summary: PersistedAudioCalibrationSummary = {
+            deviceId: readString(value.deviceId) || undefined,
+            deviceName: readString(value.deviceName) || undefined,
+            rounds:
+                typeof rounds === "number" && Number.isFinite(rounds) && rounds > 0
+                    ? Math.max(1, Math.round(rounds))
+                    : undefined,
+            successCount:
+                typeof successCount === "number" &&
+                Number.isFinite(successCount) &&
+                successCount >= 0
+                    ? Math.max(0, Math.round(successCount))
+                    : undefined,
+            failureCount:
+                typeof failureCount === "number" &&
+                Number.isFinite(failureCount) &&
+                failureCount >= 0
+                    ? Math.max(0, Math.round(failureCount))
+                    : undefined,
+            tailPaddingMs:
+                typeof tailPaddingMs === "number" &&
+                Number.isFinite(tailPaddingMs) &&
+                tailPaddingMs >= 0
+                    ? Math.max(0, Math.round(tailPaddingMs))
+                    : undefined,
+            startedAt: readString(value.startedAt) || undefined,
+            completedAt: readString(value.completedAt) || undefined,
+            lastError: readString(value.lastError) || undefined,
+            latencyProfile,
+        };
+        return Object.values(summary).some((item) => item !== undefined)
+            ? summary
+            : undefined;
+    }
+
+    private async hydratePersistedAudioCalibrationState(config: PluginConfig) {
+        if (this.speakerAudioLatencyProfilesHydrated) {
+            return;
+        }
+        this.speakerAudioLatencyProfilesHydrated = true;
+        const persisted = (await loadPersistedProfile(config.stateStorePath).catch(
+            () => ({})
+        )) as Record<string, any>;
+        const latencyProfiles =
+            persisted.speakerAudioLatencyProfiles &&
+            typeof persisted.speakerAudioLatencyProfiles === "object" &&
+            !Array.isArray(persisted.speakerAudioLatencyProfiles)
+                ? persisted.speakerAudioLatencyProfiles
+                : undefined;
+        if (latencyProfiles) {
+            Object.entries(latencyProfiles).forEach(([deviceId, profile]) => {
+                const normalizedDeviceId = readString(deviceId);
+                const normalizedProfile = this.normalizeSpeakerAudioLatencyProfile(profile);
+                if (normalizedDeviceId && normalizedProfile) {
+                    this.speakerAudioLatencyProfiles.set(
+                        normalizedDeviceId,
+                        normalizedProfile
+                    );
+                }
+            });
+        }
+        this.lastAudioCalibration = this.normalizePersistedAudioCalibrationSummary(
+            persisted.lastAudioCalibration
+        );
+    }
+
+    private buildPersistedProfile(
+        config: PluginConfig,
+        device?: DeviceContext
+    ) {
+        return {
+            account: config.account,
+            serverCountry: config.serverCountry,
+            hardware: device?.hardware || config.hardware,
+            speakerName: pickFirstString(config.speakerName, device?.name),
+            miDid: device?.miDid || config.miDid,
+            minaDeviceId: device?.minaDeviceId || config.minaDeviceId,
+            tokenStorePath: config.tokenStorePath,
+            openclawChannel: config.openclawChannel,
+            openclawTo: config.openclawTo,
+            openclawNotificationsDisabled: config.openclawNotificationsDisabled,
+            wakeWordPattern: config.wakeWordPattern,
+            dialogWindowSeconds: config.dialogWindowSeconds,
+            openclawThinkingOff: config.openclawThinkingOff,
+            openclawForceNonStreaming: config.openclawForceNonStreaming,
+            openclawVoiceSystemPrompt:
+                config.openclawVoiceSystemPrompt === DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT
+                    ? undefined
+                    : config.openclawVoiceSystemPrompt,
+            transitionPhrases:
+                JSON.stringify(config.transitionPhrases || []) ===
+                JSON.stringify(DEFAULT_TRANSITION_PHRASES)
+                    ? undefined
+                    : config.transitionPhrases,
+            debugLogEnabled: config.debugLogEnabled,
+            voiceContextMaxTurns: config.voiceContextMaxTurns,
+            voiceContextMaxChars: config.voiceContextMaxChars,
+            audioTailPaddingMs: config.audioTailPaddingMs,
+            speakerAudioLatencyProfiles:
+                this.serializeSpeakerAudioLatencyProfilesForPersistence(),
+            lastAudioCalibration: this.lastAudioCalibration,
+        };
+    }
+
+    private getAudioRelayTailPaddingMs(config?: PluginConfig) {
+        return normalizeAudioTailPaddingMs(
+            config?.audioTailPaddingMs ?? this.config?.audioTailPaddingMs
+        );
+    }
+
+    private buildConsoleAudioCalibrationState(): ConsoleAudioCalibrationState {
+        return {
+            running: this.audioCalibrationRunning,
+            tailPaddingMs: this.getAudioRelayTailPaddingMs(),
+            currentProfile: this.buildConsoleSpeakerAudioLatencyProfile(
+                this.readSpeakerAudioLatencyProfile(this.device?.minaDeviceId)
+            ),
+            lastRun: this.lastAudioCalibration,
+        };
+    }
+
     private async loadConfig(force = false): Promise<PluginConfig> {
         if (!force && this.config) {
             return this.config;
@@ -2075,6 +2726,7 @@ class XiaoaiCloudPlugin {
             stateDir: this.serviceStateDir
         });
         this.config = config;
+        await this.hydratePersistedAudioCalibrationState(config);
         this.wakeWordPatternSource = config.wakeWordPattern;
         this.wakeWordRegex = new RegExp(config.wakeWordPattern);
         this.continuousDialogWindow = clamp(
@@ -2114,10 +2766,11 @@ class XiaoaiCloudPlugin {
             events?: ConsoleEventEntry[];
             audioPlaybackClearedAt?: string;
             speakerMuteStates?: Record<string, PersistedSpeakerMuteState>;
-        }) => void | Promise<void>
+        }) => void | Promise<void>,
+        options?: { forceReload?: boolean }
     ) {
         const run = async () => {
-            const state = await this.loadConsoleState(false);
+            const state = await this.loadConsoleState(options?.forceReload === true);
             await mutator(state);
             state.events = Array.isArray(state.events)
                 ? state.events.slice(-CONSOLE_EVENT_LIMIT)
@@ -2176,12 +2829,37 @@ class XiaoaiCloudPlugin {
         };
     }
 
+    private mergePendingSoftMuteState(
+        storedState: PersistedSpeakerMuteState,
+        pendingSnapshot?: VolumeSnapshot | null
+    ) {
+        if (!pendingSnapshot || pendingSnapshot.muted !== true) {
+            return storedState;
+        }
+
+        const pendingPercent = clamp(Math.round(pendingSnapshot.percent), 0, 100);
+        const pendingRaw = Number.isFinite(pendingSnapshot.raw)
+            ? pendingSnapshot.raw
+            : pendingPercent;
+        if (pendingRaw > SOFT_VOLUME_MUTE_READBACK_MAX_PERCENT) {
+            return storedState;
+        }
+
+        return this.normalizeStoredSpeakerMuteState({
+            ...storedState,
+            mode: "soft-volume",
+            enabled: true,
+            restoreVolumePercent: pendingPercent,
+            ignoreDeviceMuteReadback: true,
+        });
+    }
+
     private async getStoredSpeakerMuteState(device?: DeviceContext | null) {
         const key = this.buildSpeakerMuteStateKey(device);
         if (!key) {
             return {};
         }
-        const state = await this.loadConsoleState(false);
+        const state = await this.loadConsoleState(true);
         return this.normalizeStoredSpeakerMuteState(state.speakerMuteStates?.[key]);
     }
 
@@ -2219,7 +2897,7 @@ class XiaoaiCloudPlugin {
                 bucket[key] = normalized;
             }
             state.speakerMuteStates = Object.keys(bucket).length > 0 ? bucket : undefined;
-        });
+        }, { forceReload: true });
 
         return normalized;
     }
@@ -2240,6 +2918,35 @@ class XiaoaiCloudPlugin {
         });
     }
 
+    private shouldTrustDeviceMuteReadback(
+        device: DeviceContext,
+        storedState: PersistedSpeakerMuteState
+    ) {
+        if (storedState.deviceMuteUnreliable === true || !this.hasDeviceMuteTransport(device)) {
+            return false;
+        }
+        if (!device.speakerFeatures.volume) {
+            return true;
+        }
+        if (storedState.mode === "device") {
+            return true;
+        }
+        return storedState.ignoreDeviceMuteReadback === false;
+    }
+
+    private resolveTrustedDeviceMuteReadback(
+        device: DeviceContext,
+        storedState: PersistedSpeakerMuteState,
+        observedDeviceMuted?: boolean
+    ) {
+        if (typeof observedDeviceMuted !== "boolean") {
+            return undefined;
+        }
+        return this.shouldTrustDeviceMuteReadback(device, storedState)
+            ? observedDeviceMuted
+            : false;
+    }
+
     private async resolveSoftVolumeObservedState(
         device: DeviceContext,
         storedState: PersistedSpeakerMuteState,
@@ -2247,8 +2954,6 @@ class XiaoaiCloudPlugin {
         observedDeviceMuted?: boolean
     ) {
         const normalizedPercent = clamp(Math.round(observedPercent), 0, 100);
-        const effectiveDeviceMuted =
-            storedState.deviceMuteUnreliable === true ? false : observedDeviceMuted;
         if (storedState.mode !== "soft-volume") {
             return {
                 muted: storedState.enabled === true,
@@ -2257,19 +2962,27 @@ class XiaoaiCloudPlugin {
         }
 
         const ignoreDeviceMuteReadback = storedState.ignoreDeviceMuteReadback !== false;
-        const nextEnabled = storedState.enabled === true && normalizedPercent === 0;
+        const effectiveDeviceMuted = ignoreDeviceMuteReadback
+            ? false
+            : this.resolveTrustedDeviceMuteReadback(
+                device,
+                storedState,
+                observedDeviceMuted
+            );
+        const storedRestoreVolume = readNumber(storedState.restoreVolumePercent);
+        const preservedRestoreVolume =
+            typeof storedRestoreVolume === "number"
+                ? clamp(Math.round(storedRestoreVolume), 0, 100)
+                : normalizedPercent;
+        const nextEnabled =
+            storedState.enabled === true &&
+            normalizedPercent <= SOFT_VOLUME_MUTE_READBACK_MAX_PERCENT;
         const effectiveMuted = effectiveDeviceMuted === true || nextEnabled;
         const nextRestoreVolumePercent =
-            nextEnabled
-                ? normalizedPercent > 0
-                    ? normalizedPercent
-                    : storedState.restoreVolumePercent
-                : normalizedPercent;
+            nextEnabled ? preservedRestoreVolume : normalizedPercent;
         const displayPercent = clamp(
             Math.round(
-                readNumber(
-                    nextEnabled ? nextRestoreVolumePercent : normalizedPercent
-                ) || 0
+                readNumber(nextEnabled ? preservedRestoreVolume : normalizedPercent) || 0
             ),
             0,
             100
@@ -2369,16 +3082,20 @@ class XiaoaiCloudPlugin {
         } | null
     ): VolumeSnapshot {
         const normalizedPercent = clamp(Math.round(observedPercent), 0, 100);
+        const trustedDeviceMuted = this.resolveTrustedDeviceMuteReadback(
+            device,
+            storedState,
+            deviceMuted
+        );
         return {
             percent: softMuteState?.effectivePercent ?? normalizedPercent,
             raw,
             muted:
                 softMuteState?.muted ??
-                this.resolveStoredSpeakerMuteFlag(storedState, deviceMuted),
+                this.resolveStoredSpeakerMuteFlag(storedState, trustedDeviceMuted),
             source,
-            deviceMuted:
-                storedState.deviceMuteUnreliable === true ? false : deviceMuted === true,
-            unmuteBlocked: this.isSpeakerUnmuteBlocked(storedState, deviceMuted),
+            deviceMuted: trustedDeviceMuted === true,
+            unmuteBlocked: this.isSpeakerUnmuteBlocked(storedState, trustedDeviceMuted),
             muteSupported: this.isSpeakerMuteControlSupportedFor(device, storedState),
         };
     }
@@ -2407,13 +3124,13 @@ class XiaoaiCloudPlugin {
             if (entry.audioUrl) {
                 state.audioPlaybackClearedAt = undefined;
             }
-        });
+        }, { forceReload: true });
     }
 
     private async clearConsoleAudioPlaybackState() {
         await this.mutateConsoleState((state) => {
             state.audioPlaybackClearedAt = new Date().toISOString();
-        });
+        }, { forceReload: true });
     }
 
     private recordConsoleEvent(
@@ -2442,33 +3159,54 @@ class XiaoaiCloudPlugin {
         const token = randomBytes(24).toString("hex");
         await this.mutateConsoleState((draft) => {
             draft.accessToken = token;
-        });
+        }, { forceReload: true });
         return token;
     }
 
     private async computeConsoleBaseUrls() {
         const config = await this.loadConfig(false);
-        const urls = new Set<string>();
-        if (config.publicBaseUrl?.trim()) {
-            urls.add(config.publicBaseUrl.trim().replace(/\/+$/, ""));
-        }
+        const explicitBases: string[] = [];
+        const discoveredBases: string[] = [];
+        const addCandidate = (
+            value: string | undefined,
+            options?: { explicit?: boolean }
+        ) => {
+            const normalized = normalizeBaseUrl(value);
+            if (!normalized) {
+                return;
+            }
+            try {
+                const parsed = new URL(normalized);
+                const target = options?.explicit ? explicitBases : discoveredBases;
+                target.push(parsed.toString().replace(/\/+$/, ""));
+            } catch {
+                // Ignore malformed bases here and let other candidates continue.
+            }
+        };
+
+        addCandidate(config.publicBaseUrl, { explicit: true });
         for (const gatewayBase of await discoverGatewayBaseUrls(this.api)) {
             const trimmed = gatewayBase.trim();
             if (trimmed) {
-                urls.add(`${trimmed.replace(/\/+$/, "")}${config.authRoutePath}`);
+                addCandidate(`${trimmed.replace(/\/+$/, "")}${config.authRoutePath}`);
             }
         }
-        if (urls.size === 0) {
-            urls.add(config.authRoutePath);
+        const orderedBases = uniqueStrings([
+            ...explicitBases,
+            ...sortConsoleBaseUrls(discoveredBases),
+        ]);
+        if (orderedBases.length === 0) {
+            return [config.authRoutePath];
         }
-        return Array.from(urls);
+        return orderedBases;
     }
 
     private async computeAudioRelayBaseUrls() {
         const config = await this.loadConfig(false);
+        const preferredBases: string[] = [];
         const directBases: string[] = [];
         const loopbackBases: string[] = [];
-        const addCandidate = (value: string | undefined) => {
+        const addCandidate = (value: string | undefined, options?: { preferred?: boolean }) => {
             const normalized = normalizeBaseUrl(value);
             if (!normalized) {
                 return;
@@ -2477,6 +3215,8 @@ class XiaoaiCloudPlugin {
                 const parsed = new URL(normalized);
                 const target = isLoopbackHostname(parsed.hostname)
                     ? loopbackBases
+                    : options?.preferred
+                        ? preferredBases
                     : directBases;
                 if (parsed.protocol === "https:" && looksLikeIpHostname(parsed.hostname)) {
                     const httpParsed = new URL(parsed.toString());
@@ -2492,6 +3232,7 @@ class XiaoaiCloudPlugin {
             }
         };
 
+        addCandidate(config.audioPublicBaseUrl, { preferred: true });
         addCandidate(config.publicBaseUrl);
         for (const gatewayBase of await discoverGatewayBaseUrls(this.api)) {
             const trimmed = gatewayBase.trim();
@@ -2501,7 +3242,76 @@ class XiaoaiCloudPlugin {
             addCandidate(`${trimmed.replace(/\/+$/, "")}${config.authRoutePath}`);
         }
 
-        return uniqueStrings([...directBases, ...loopbackBases]);
+        if (
+            !config.audioPublicBaseUrl &&
+            !config.publicBaseUrl &&
+            preferredBases.length === 0 &&
+            directBases.length === 0
+        ) {
+            for (const lanBase of await this.computeLanAudioRelayBaseUrls(config)) {
+                addCandidate(lanBase, { preferred: true });
+            }
+        }
+
+        return uniqueStrings([...preferredBases, ...directBases, ...loopbackBases]);
+    }
+
+    private async computeLanAudioRelayBaseUrls(config: PluginConfig) {
+        if (typeof this.api?.registerHttpRoute !== "function") {
+            return [];
+        }
+
+        const globalConfig = await readOpenclawGlobalConfig(this.api).catch(() => undefined);
+        const gatewayConfig = globalConfig?.gateway;
+        const customBindHost = readString(gatewayConfig?.customBindHost)?.trim().toLowerCase();
+        if (customBindHost && isLoopbackHostname(customBindHost)) {
+            return [];
+        }
+
+        const gatewayPort = clamp(
+            Math.round(
+                readNumber(gatewayConfig?.publicPort) ||
+                readNumber(gatewayConfig?.port) ||
+                18798
+            ),
+            1,
+            65535
+        );
+        const hosts = customBindHost && isPrivateHostname(customBindHost)
+            ? [customBindHost]
+            : readLocalLanIpv4Addresses();
+        const urls: string[] = [];
+
+        for (const host of hosts) {
+            if (!host || isLoopbackHostname(host)) {
+                continue;
+            }
+            if (gatewayPort === 80) {
+                urls.push(`http://${host}${config.authRoutePath}`);
+            } else if (gatewayPort === 443) {
+                urls.push(`https://${host}${config.authRoutePath}`);
+                urls.push(`http://${host}${config.authRoutePath}`);
+            } else {
+                urls.push(`http://${host}:${gatewayPort}${config.authRoutePath}`);
+            }
+        }
+
+        return uniqueStrings(urls);
+    }
+
+    private async computeSpeakerReachableAudioRelayBaseUrls() {
+        const bases = await this.computeAudioRelayBaseUrls();
+        return bases.filter((value) => {
+            const normalized = normalizeBaseUrl(value);
+            if (!normalized) {
+                return false;
+            }
+            try {
+                return !isLoopbackHostname(new URL(normalized).hostname);
+            } catch {
+                return false;
+            }
+        });
     }
 
     private async getConsoleEntryUrl() {
@@ -2595,7 +3405,6 @@ class XiaoaiCloudPlugin {
             if (!this.isTransientNetworkError(message)) {
                 throw error;
             }
-            this.lastError = message;
             await this.appendDebugTrace("conversation_history_transient_error", {
                 message,
                 limit,
@@ -2776,6 +3585,8 @@ class XiaoaiCloudPlugin {
             consoleUrl,
             audioPlayback,
             openclawAgentState,
+            openclawRoute,
+            openclawWorkspaceFiles,
         ] = await Promise.all([
             this.getMicoapiHelperStatus(config),
             config?.account
@@ -2787,7 +3598,16 @@ class XiaoaiCloudPlugin {
             config
                 ? this.queryOpenclawAgentModelState(config).catch(() => undefined)
                 : Promise.resolve(undefined),
+            config
+                ? this.buildConsoleOpenclawRouteState(config).catch(() => undefined)
+                : Promise.resolve(undefined),
+            config
+                ? this.queryOpenclawWorkspaceFilesState(config).catch(() => undefined)
+                : Promise.resolve(undefined),
         ]);
+        const agentsWorkspaceFile = openclawWorkspaceFiles?.files.find(
+            (item) => item.id === "agents"
+        );
         const authenticated = Boolean(this.device) || Boolean(config?.account && hasPersistedSession);
         const session =
             this.getLoginSessionSnapshot() ||
@@ -2816,6 +3636,7 @@ class XiaoaiCloudPlugin {
             thinkingEnabled: !(config?.openclawThinkingOff ?? true),
             openclawForceNonStreaming: config?.openclawForceNonStreaming ?? false,
             openclawVoiceSystemPrompt:
+                agentsWorkspaceFile?.content ||
                 openclawAgentState?.systemPrompt ||
                 config?.openclawVoiceSystemPrompt ||
                 DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
@@ -2834,6 +3655,9 @@ class XiaoaiCloudPlugin {
                     : undefined,
             lastConversationQuery: this.lastConversationQuery || undefined,
             lastError: this.lastError,
+            lastErrorTransient: this.lastError
+                ? this.isTransientNetworkError(this.lastError)
+                : undefined,
             consoleUrl,
             loginUrl: authenticated ? undefined : session?.primaryUrl,
             loginHint: authenticated
@@ -2859,6 +3683,9 @@ class XiaoaiCloudPlugin {
                 }
                 : null,
             audioPlayback,
+            openclawRoute,
+            openclawWorkspaceFiles,
+            audioCalibration: this.buildConsoleAudioCalibrationState(),
         };
     }
 
@@ -2973,6 +3800,40 @@ class XiaoaiCloudPlugin {
         };
     }
 
+    private async buildConsoleOpenclawRouteState(
+        config: PluginConfig
+    ): Promise<ConsoleOpenclawRouteState> {
+        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const configuredChannels = collectConfiguredOpenclawChannels(globalConfig);
+        const currentChannel =
+            readString(config.openclawChannel)?.toLowerCase() ||
+            inferConfiguredOpenclawChannel(globalConfig) ||
+            "telegram";
+        const channelIds = Array.from(
+            new Set(
+                [currentChannel, ...configuredChannels].filter(
+                    (item): item is string => Boolean(readString(item))
+                )
+            )
+        );
+        const channels = channelIds.map((channelId) => ({
+            id: channelId,
+            label: formatConsoleOpenclawChannelLabel(channelId),
+            configured: configuredChannels.includes(channelId),
+            targets: collectOpenclawNotificationTargets(globalConfig, channelId),
+        }));
+
+        return {
+            agentId: readString(config.openclawAgent) || "main",
+            channel: currentChannel,
+            target: readString(config.openclawTo),
+            enabled:
+                config.openclawNotificationsDisabled !== true &&
+                Boolean(readString(config.openclawTo)),
+            channels,
+        };
+    }
+
     private readOpenclawAgentListFromConfig(globalConfig: Record<string, any> | undefined) {
         return Array.isArray(globalConfig?.agents?.list)
             ? globalConfig.agents.list
@@ -3051,6 +3912,112 @@ class XiaoaiCloudPlugin {
             })}\n`,
             "utf8"
         );
+    }
+
+    private async readOpenclawWorkspaceFileState(
+        workspacePath: string | undefined,
+        fileRef: OpenclawWorkspaceFileId | string
+    ): Promise<ConsoleOpenclawWorkspaceFileState> {
+        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        if (!definition) {
+            throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
+        }
+        const filePath = workspacePath ? path.join(workspacePath, definition.filename) : "";
+        let raw = "";
+        let fileExists = false;
+        if (filePath) {
+            try {
+                raw = await readFile(filePath, "utf8");
+                fileExists = true;
+            } catch {
+                raw = "";
+                fileExists = false;
+            }
+        }
+        const normalizedStored = normalizeOpenclawWorkspaceFileContent(definition, raw, {
+            fallbackToDefault: false,
+        });
+        const enabled = fileExists && Boolean(normalizedStored);
+        return {
+            id: definition.id,
+            filename: definition.filename,
+            label: definition.label,
+            description: definition.description,
+            enabled,
+            customized: enabled && normalizedStored !== definition.defaultContent,
+            defaultEnabled: definition.defaultEnabled,
+            disableAllowed: definition.disableAllowed,
+            defaultContent: definition.defaultContent,
+            content: enabled ? normalizedStored : definition.defaultContent,
+        };
+    }
+
+    private async writeOpenclawWorkspaceFile(
+        workspacePath: string,
+        fileRef: OpenclawWorkspaceFileId | string,
+        content: string
+    ) {
+        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        if (!definition) {
+            throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
+        }
+        const normalized = normalizeOpenclawWorkspaceFileContent(definition, content, {
+            fallbackToDefault: true,
+        });
+        await mkdir(workspacePath, { recursive: true });
+        await writeFile(
+            path.join(workspacePath, definition.filename),
+            `${normalized}\n`,
+            "utf8"
+        );
+        return normalized;
+    }
+
+    private async disableOpenclawWorkspaceFile(
+        workspacePath: string,
+        fileRef: OpenclawWorkspaceFileId | string
+    ) {
+        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        if (!definition) {
+            throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
+        }
+        if (!definition.disableAllowed) {
+            throw new Error(`${definition.filename} 是核心提示文件，当前不支持在控制台禁用。`);
+        }
+        const filePath = path.join(workspacePath, definition.filename);
+        await mkdir(workspacePath, { recursive: true });
+        if (definition.id === "boot") {
+            try {
+                await unlink(filePath);
+            } catch (error) {
+                const code =
+                    error && typeof error === "object" && "code" in error
+                        ? String((error as NodeJS.ErrnoException).code || "")
+                        : "";
+                if (code !== "ENOENT") {
+                    throw error;
+                }
+            }
+            return;
+        }
+        await writeFile(filePath, "", "utf8");
+    }
+
+    private async queryOpenclawWorkspaceFilesState(
+        config: PluginConfig
+    ): Promise<ConsoleOpenclawWorkspaceState> {
+        const agentId = readString(config.openclawAgent) || "main";
+        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
+        const workspacePath = this.resolveOpenclawAgentWorkspacePath(agentConfig, globalConfig);
+        return {
+            agentId,
+            files: await Promise.all(
+                OPENCLAW_WORKSPACE_FILE_DEFINITIONS.map((item) =>
+                    this.readOpenclawWorkspaceFileState(workspacePath, item.id)
+                )
+            ),
+        };
     }
 
     private readOpenclawResponsesEndpointEnabled(
@@ -3376,6 +4343,8 @@ class XiaoaiCloudPlugin {
                 this.handlePasswordLogin(sessionId, payload),
             onVerifyTicket: async (sessionId, payload) =>
                 this.handleVerificationTicket(sessionId, payload),
+            onPrepareVerificationPage: async (sessionId, payload) =>
+                this.handlePrepareVerificationPage(sessionId, payload.preferredMethod),
             onTrace: async (event, details) =>
                 this.appendDebugTrace(event, details),
         });
@@ -3567,6 +4536,10 @@ class XiaoaiCloudPlugin {
                 sendJson(response, 200, await this.queryOpenclawAgentModelState(config));
                 return true;
             }
+            if (requestMethod === "GET" && action === "openclaw/route") {
+                sendJson(response, 200, await this.buildConsoleOpenclawRouteState(config));
+                return true;
+            }
             if (requestMethod === "POST" && action === "chat/send") {
                 const body = await readJsonBody(request);
                 const text = readString(body?.text);
@@ -3719,6 +4692,59 @@ class XiaoaiCloudPlugin {
                     message: ok
                         ? "已停止当前音频，并清空当前播放展示。"
                         : "停止失败，请稍后再试。",
+                });
+                return true;
+            }
+            if (requestMethod === "POST" && action === "device/audio-calibration") {
+                if (this.audioCalibrationRunning) {
+                    sendJson(response, 409, {
+                        error: "静音校准正在进行中，请稍后再试。",
+                    });
+                    return true;
+                }
+                const calibration = await this.runSpeakerAudioCalibration();
+                const successCount = readNumber(calibration.successCount) || 0;
+                const rounds = readNumber(calibration.rounds) || 0;
+                sendJson(response, 200, {
+                    ok: true,
+                    message:
+                        successCount === rounds
+                            ? `静音校准完成，共 ${rounds} 轮全部成功。`
+                            : `静音校准完成，成功 ${successCount}/${rounds} 轮。`,
+                    calibration,
+                });
+                return true;
+            }
+            if (requestMethod === "POST" && action === "device/audio-tail-padding") {
+                const body = await readJsonBody(request);
+                const tailPaddingMs = readNumber(
+                    body?.tailPaddingMs ?? body?.milliseconds ?? body?.ms
+                );
+                const tailPaddingSeconds = readNumber(body?.seconds);
+                const resolvedInput =
+                    typeof tailPaddingMs === "number"
+                        ? tailPaddingMs
+                        : typeof tailPaddingSeconds === "number"
+                            ? tailPaddingSeconds * 1000
+                            : undefined;
+                if (typeof resolvedInput !== "number" || !Number.isFinite(resolvedInput)) {
+                    sendJson(response, 400, { error: "空余延迟参数无效。" });
+                    return true;
+                }
+                const result = await this.updateAudioTailPaddingMs(resolvedInput);
+                await this.appendConsoleEvent(
+                    "console.audio_tail_padding",
+                    "控制台修改空余延迟",
+                    `${result.previousTailPaddingMs}ms -> ${result.tailPaddingMs}ms`,
+                    "success"
+                );
+                sendJson(response, 200, {
+                    ok: true,
+                    tailPaddingMs: result.tailPaddingMs,
+                    calibration: this.buildConsoleAudioCalibrationState(),
+                    message: result.changed
+                        ? `空余延迟已更新为 ${result.tailPaddingMs}ms`
+                        : `当前空余延迟保持 ${result.tailPaddingMs}ms`,
                 });
                 return true;
             }
@@ -3998,6 +5024,36 @@ class XiaoaiCloudPlugin {
                 });
                 return true;
             }
+            if (requestMethod === "POST" && action === "openclaw/route") {
+                const body = await readJsonBody(request);
+                const result = await this.updateOpenclawNotificationRoute({
+                    channel: body?.channel,
+                    target: body?.target,
+                    disableNotification:
+                        body?.disableNotification ??
+                        body?.disabled ??
+                        body?.enabled === false,
+                });
+                const routeState = await this.buildConsoleOpenclawRouteState(
+                    this.config || config
+                );
+                await this.appendConsoleEvent(
+                    "console.openclaw_route",
+                    "控制台修改通知渠道",
+                    result.enabled
+                        ? `${result.previousChannel}/${result.previousTarget || "未配置"} -> ${result.channel}/${result.target || "未配置"}`
+                        : `${result.previousChannel}/${result.previousTarget || "未配置"} -> 已关闭通知`,
+                    "success"
+                );
+                sendJson(response, 200, {
+                    ok: true,
+                    route: routeState,
+                    message: result.enabled
+                        ? `插件通知已改为 ${result.channel} / ${result.target}。`
+                        : "已关闭插件通知渠道；小爱对话仍会固定走专属 xiaoai agent。",
+                });
+                return true;
+            }
             if (requestMethod === "POST" && action === "debug-log") {
                 const body = await readJsonBody(request);
                 const enabled = readBoolean(body?.enabled ?? body?.debugLogEnabled);
@@ -4078,6 +5134,49 @@ class XiaoaiCloudPlugin {
                         : result.customized
                             ? `当前 xiaoai agent workspace 的自定义 ${OPENCLAW_AGENT_PROMPT_FILENAME} 保持不变。`
                             : `当前 xiaoai agent workspace 已在使用默认 ${OPENCLAW_AGENT_PROMPT_FILENAME} 内容。`,
+                });
+                return true;
+            }
+            if (requestMethod === "POST" && action === "openclaw/workspace-file") {
+                const body = await readJsonBody(request);
+                const result = await this.updateOpenclawWorkspaceFile(
+                    body?.file ?? body?.filename ?? body?.id,
+                    {
+                        content:
+                            typeof body?.content === "string"
+                                ? body.content
+                                : typeof body?.prompt === "string"
+                                    ? body.prompt
+                                    : typeof body?.value === "string"
+                                        ? body.value
+                                        : "",
+                        enabled:
+                            typeof body?.enabled === "boolean" ? body.enabled : undefined,
+                    }
+                );
+                await this.appendConsoleEvent(
+                    "console.workspace_file",
+                    "控制台修改 workspace 文件",
+                    `${result.file.filename} · ${
+                        result.disabled
+                            ? "已禁用"
+                            : result.file.customized
+                                ? "已保存自定义内容"
+                                : "已恢复默认内容"
+                    }`,
+                    "success"
+                );
+                sendJson(response, 200, {
+                    ok: true,
+                    file: result.file,
+                    disabled: result.disabled,
+                    message: result.disabled
+                        ? result.file.filename === "BOOT.md"
+                            ? `已禁用 xiaoai agent workspace 的 ${result.file.filename}；文件已移除。`
+                            : `已禁用 xiaoai agent workspace 的 ${result.file.filename}；文件内容已清空。`
+                        : result.file.customized
+                            ? `已保存 xiaoai agent workspace 的 ${result.file.filename}。`
+                            : `已恢复 xiaoai agent workspace 的 ${result.file.filename} 默认内容。`,
                 });
                 return true;
             }
@@ -4368,13 +5467,16 @@ class XiaoaiCloudPlugin {
             return;
         }
 
+        const backupUrls = session.allUrls
+            .filter((item) => item && item !== session.primaryUrl)
+            .slice(0, 1);
         const lines = [
             "小爱直连插件目前还没完成登录，已经为你生成了一个临时登录入口。",
             reason ? `当前原因：${reason}` : undefined,
             "",
             `登录地址：${session.primaryUrl}`,
-            session.allUrls.length > 1
-                ? `可选地址：\n${session.allUrls.join("\n")}`
+            backupUrls.length > 0
+                ? `备用地址：\n${backupUrls.join("\n")}`
                 : undefined,
             `过期时间：${session.expiresAt}`,
             "",
@@ -4628,8 +5730,8 @@ class XiaoaiCloudPlugin {
             message: [
                 error.message,
                 methodLabels,
-                "先在小米验证页里发送验证码，不要在那里完成最终验证；收到验证码后回到当前页面下方的“二次验证”区域提交。",
-                "如果那个页面最后跳到 api2.mina.mi.com/sts 或显示 401，可以直接关闭，不影响这里继续。",
+                "先点页面上的“打开验证页面”按钮，在官方页面获取验证码。",
+                "回到当前页面填写验证码后，再点“登录”继续。",
             ]
                 .filter(Boolean)
                 .join("\n"),
@@ -4883,24 +5985,18 @@ class XiaoaiCloudPlugin {
         await accountClient.invalidateSid("xiaomiio").catch(() => undefined);
         await accountClient.clearStoredPassToken().catch(() => undefined);
         await this.safeUnlink(config.tokenStorePath).catch(() => undefined);
-        await savePersistedProfile(config.stateStorePath, {
-            wakeWordPattern: this.wakeWordPatternSource || config.wakeWordPattern,
-            dialogWindowSeconds: this.continuousDialogWindow || config.dialogWindowSeconds,
-            openclawThinkingOff: config.openclawThinkingOff,
-            openclawForceNonStreaming: config.openclawForceNonStreaming,
-            openclawVoiceSystemPrompt:
-                config.openclawVoiceSystemPrompt === DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT
-                    ? undefined
-                    : config.openclawVoiceSystemPrompt,
-            transitionPhrases:
-                JSON.stringify(config.transitionPhrases || []) ===
-                JSON.stringify(DEFAULT_TRANSITION_PHRASES)
-                    ? undefined
-                    : config.transitionPhrases,
-            debugLogEnabled: config.debugLogEnabled,
-            voiceContextMaxTurns: config.voiceContextMaxTurns,
-            voiceContextMaxChars: config.voiceContextMaxChars,
-        });
+        const nextConfig = {
+            ...config,
+            account: undefined,
+            hardware: undefined,
+            speakerName: undefined,
+            miDid: undefined,
+            minaDeviceId: undefined,
+        } satisfies PluginConfig;
+        await savePersistedProfile(
+            config.stateStorePath,
+            this.buildPersistedProfile(nextConfig)
+        );
 
         this.resetRuntimeState();
         const session = await this.ensureLoginSession(true).catch(() => null);
@@ -5010,34 +6106,11 @@ class XiaoaiCloudPlugin {
         device?: DeviceContext,
         strict = false
     ) {
-        const profile = {
-            account: config.account,
-            serverCountry: config.serverCountry,
-            hardware: device?.hardware || config.hardware,
-            speakerName: pickFirstString(config.speakerName, device?.name),
-            miDid: device?.miDid || config.miDid,
-            minaDeviceId: device?.minaDeviceId || config.minaDeviceId,
-            tokenStorePath: config.tokenStorePath,
-            wakeWordPattern: config.wakeWordPattern,
-            dialogWindowSeconds: config.dialogWindowSeconds,
-            openclawThinkingOff: config.openclawThinkingOff,
-            openclawForceNonStreaming: config.openclawForceNonStreaming,
-            openclawVoiceSystemPrompt:
-                config.openclawVoiceSystemPrompt === DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT
-                    ? undefined
-                    : config.openclawVoiceSystemPrompt,
-            transitionPhrases:
-                JSON.stringify(config.transitionPhrases || []) ===
-                JSON.stringify(DEFAULT_TRANSITION_PHRASES)
-                    ? undefined
-                    : config.transitionPhrases,
-            debugLogEnabled: config.debugLogEnabled,
-            voiceContextMaxTurns: config.voiceContextMaxTurns,
-            voiceContextMaxChars: config.voiceContextMaxChars,
-        };
-
         try {
-            await savePersistedProfile(config.stateStorePath, profile);
+            await savePersistedProfile(
+                config.stateStorePath,
+                this.buildPersistedProfile(config, device)
+            );
         } catch (error) {
             if (strict) {
                 throw error;
@@ -5093,6 +6166,85 @@ class XiaoaiCloudPlugin {
         };
     }
 
+    private async updateAudioTailPaddingMs(msInput: number) {
+        const config = await this.loadConfig(false);
+        const previousTailPaddingMs = this.getAudioRelayTailPaddingMs(config);
+        const tailPaddingMs = normalizeAudioTailPaddingMs(
+            msInput,
+            previousTailPaddingMs
+        );
+        const nextConfig: PluginConfig = {
+            ...config,
+            audioTailPaddingMs: tailPaddingMs,
+        };
+        this.config = nextConfig;
+        await this.persistResolvedProfile(nextConfig, this.device, true);
+        return {
+            tailPaddingMs,
+            previousTailPaddingMs,
+            changed: tailPaddingMs !== previousTailPaddingMs,
+        };
+    }
+
+    private async updateOpenclawNotificationRoute(input: {
+        channel?: string;
+        target?: string;
+        disableNotification?: boolean;
+    }) {
+        const config = await this.loadConfig(false);
+        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const previousChannel = readString(config.openclawChannel) || "telegram";
+        const previousTarget = readString(config.openclawTo);
+        const previousEnabled =
+            config.openclawNotificationsDisabled !== true && Boolean(previousTarget);
+        const disableNotification = readBoolean(input.disableNotification) === true;
+        const nextChannel =
+            readString(input.channel)?.toLowerCase() ||
+            previousChannel ||
+            inferConfiguredOpenclawChannel(globalConfig) ||
+            "telegram";
+
+        if (!nextChannel) {
+            throw new HttpError(400, "通知渠道参数无效。");
+        }
+
+        let nextTarget: string | undefined;
+        if (!disableNotification) {
+            const explicitTarget = readString(input.target);
+            nextTarget =
+                explicitTarget ||
+                inferOpenclawNotificationTarget(globalConfig, nextChannel);
+            if (!nextTarget) {
+                throw new HttpError(
+                    400,
+                    `渠道 ${nextChannel} 没有唯一可用目标，请手动填写目标。`
+                );
+            }
+        }
+
+        const nextConfig: PluginConfig = {
+            ...config,
+            openclawChannel: nextChannel,
+            openclawTo: nextTarget,
+            openclawNotificationsDisabled: disableNotification,
+        };
+        this.config = nextConfig;
+        await this.persistResolvedProfile(nextConfig, this.device, true);
+
+        return {
+            channel: nextChannel,
+            target: nextTarget,
+            enabled: !disableNotification && Boolean(nextTarget),
+            previousChannel,
+            previousTarget,
+            previousEnabled,
+            changed:
+                nextChannel !== previousChannel ||
+                nextTarget !== previousTarget ||
+                (!disableNotification && Boolean(nextTarget)) !== previousEnabled,
+        };
+    }
+
     private async updateOpenclawThinkingOff(enabledInput: boolean) {
         const config = await this.loadConfig(false);
         const previousEnabled = config.openclawThinkingOff;
@@ -5138,11 +6290,18 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawVoiceSystemPrompt(promptInput: string | undefined) {
+    private async updateOpenclawWorkspaceFile(
+        fileRef: OpenclawWorkspaceFileId | string,
+        options?: {
+            content?: string;
+            enabled?: boolean;
+        }
+    ) {
+        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        if (!definition) {
+            throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
+        }
         const config = await this.loadConfig(false);
-        const nextPrompt = normalizeOpenclawVoiceSystemPrompt(promptInput, {
-            fallbackToDefault: true,
-        });
         const agentId = readString(config.openclawAgent) || "main";
         const globalConfig = await readOpenclawGlobalConfig(this.api);
         const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
@@ -5152,30 +6311,62 @@ class XiaoaiCloudPlugin {
         const workspacePath = this.resolveOpenclawAgentWorkspacePath(agentConfig, globalConfig);
         if (!workspacePath) {
             throw new Error(
-                `没有找到 id 为 ${agentId} 的 OpenClaw agent workspace，暂时不能写入 ${OPENCLAW_AGENT_PROMPT_FILENAME}。`
+                `没有找到 id 为 ${agentId} 的 OpenClaw agent workspace，暂时不能写入 ${definition.filename}。`
             );
         }
-        const promptState = await this.readOpenclawAgentWorkspacePromptState(
+
+        const previousFile = await this.readOpenclawWorkspaceFileState(
             workspacePath,
-            config.openclawVoiceSystemPrompt
+            definition.id
         );
-        const previousPrompt = promptState.prompt;
-        const nextConfig: PluginConfig = {
-            ...config,
-            openclawVoiceSystemPrompt: nextPrompt,
-        };
-        this.config = nextConfig;
-        const promptFileReady = promptState.exists && promptState.raw.trim().length > 0;
-        const changed = !promptFileReady || nextPrompt !== previousPrompt;
-        if (changed) {
-            await this.writeOpenclawAgentWorkspacePrompt(workspacePath, nextPrompt);
+        const requestedEnabled = typeof options?.enabled === "boolean" ? options.enabled : true;
+
+        if (!requestedEnabled) {
+            await this.disableOpenclawWorkspaceFile(workspacePath, definition.id);
+            const file = await this.readOpenclawWorkspaceFileState(workspacePath, definition.id);
+            return {
+                file,
+                previousFile,
+                changed: previousFile.enabled,
+                disabled: true,
+            };
         }
-        await this.persistResolvedProfile(nextConfig, this.device, true);
+
+        const normalizedContent = await this.writeOpenclawWorkspaceFile(
+            workspacePath,
+            definition.id,
+            options?.content ?? ""
+        );
+        if (definition.id === "agents") {
+            const nextConfig: PluginConfig = {
+                ...config,
+                openclawVoiceSystemPrompt: normalizedContent,
+            };
+            this.config = nextConfig;
+            await this.persistResolvedProfile(nextConfig, this.device, true);
+        }
+        const file = await this.readOpenclawWorkspaceFileState(workspacePath, definition.id);
         return {
-            prompt: nextPrompt,
-            previousPrompt,
-            changed,
-            customized: nextPrompt !== DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
+            file,
+            previousFile,
+            changed:
+                !previousFile.enabled ||
+                previousFile.content !== file.content ||
+                previousFile.customized !== file.customized,
+            disabled: false,
+        };
+    }
+
+    private async updateOpenclawVoiceSystemPrompt(promptInput: string | undefined) {
+        const result = await this.updateOpenclawWorkspaceFile("agents", {
+            content: promptInput,
+            enabled: true,
+        });
+        return {
+            prompt: result.file.content,
+            previousPrompt: result.previousFile.content,
+            changed: result.changed,
+            customized: result.file.customized,
             restarting: false,
         };
     }
@@ -5410,7 +6601,7 @@ class XiaoaiCloudPlugin {
 
         const pending = this.pendingVerifications.get(sessionId);
         if (!pending) {
-            throw new Error("当前没有待处理的二次验证会话，请重新点一次“登录并获取设备”。");
+            throw new Error("当前没有待处理的二次验证会话，请重新点一次“登录”。");
         }
 
         const nextConfig = await this.buildPasswordLoginConfig(pending.payload);
@@ -5462,6 +6653,43 @@ class XiaoaiCloudPlugin {
 
         return {
             message: `验证完成，已接入设备 ${device.name} (${device.hardware}/${device.model})。`,
+        };
+    }
+
+    private async handlePrepareVerificationPage(
+        sessionId: string,
+        preferredMethod?: XiaomiVerificationMethod
+    ): Promise<VerificationPageOpenPayload> {
+        const pending = this.pendingVerifications.get(sessionId);
+        if (!pending) {
+            throw new Error("当前没有待处理的二次验证会话，请重新点一次“登录”。");
+        }
+
+        const nextConfig = await this.buildPasswordLoginConfig(pending.payload);
+        const accountClient = new XiaomiAccountClient({
+            username: nextConfig.account || "anonymous",
+            password: nextConfig.password,
+            tokenStorePath: nextConfig.tokenStorePath,
+            debugLogPath: nextConfig.debugLogPath,
+            debugLogEnabled: nextConfig.debugLogEnabled,
+            pythonCommand: nextConfig.pythonCommand,
+        });
+        accountClient.setVerificationState(pending.state);
+
+        const result = await accountClient.prepareVerificationPage(preferredMethod);
+        const nextState = accountClient.getVerificationState() || pending.state;
+        this.pendingVerifications.set(sessionId, {
+            ...pending,
+            state: nextState,
+        });
+
+        return {
+            message: result.message,
+            openUrl: result.openUrl,
+            verification: {
+                verifyUrl: nextState.verifyUrl,
+                methods: nextState.verifyMethods,
+            },
         };
     }
 
@@ -5652,7 +6880,9 @@ class XiaoaiCloudPlugin {
             this.lastConversationQuery = String(latest.query || "");
         } catch (error) {
             const message = this.errorMessage(error);
-            this.lastError = message;
+            if (!this.isTransientNetworkError(message)) {
+                this.lastError = message;
+            }
             await this.appendDebugTrace("conversation_cursor_prime_failed", {
                 message,
             });
@@ -5686,18 +6916,19 @@ class XiaoaiCloudPlugin {
             try {
                 await this.pollConversationOnce();
             } catch (error) {
-                this.lastError = this.errorMessage(error);
-                if (this.isTransientNetworkError(this.lastError)) {
+                const message = this.errorMessage(error);
+                if (this.isTransientNetworkError(message)) {
                     console.warn(
-                        `[XiaoAI Cloud] 会话轮询暂时失败，将自动重试: ${this.lastError}`
+                        `[XiaoAI Cloud] 会话轮询暂时失败，将自动重试: ${message}`
                     );
                     await this.appendDebugTrace("conversation_poll_transient_error", {
-                        message: this.lastError,
+                        message,
                     });
                 } else {
-                    console.error(`[XiaoAI Cloud] 会话轮询失败: ${this.lastError}`);
+                    this.lastError = message;
+                    console.error(`[XiaoAI Cloud] 会话轮询失败: ${message}`);
                 }
-                if (this.shouldResetRuntime(this.lastError)) {
+                if (this.shouldResetRuntime(message)) {
                     this.resetRuntimeState({ preserveVoiceSession: true });
                     await this.handleInitializationFailure(error).catch((portalError) => {
                         console.error(
@@ -6275,6 +7506,14 @@ class XiaoaiCloudPlugin {
         return typeof position === "number" && position > 0;
     }
 
+    private isSpeakerPlaybackActivelyPlaying(snapshot: SpeakerPlaybackSnapshot | null) {
+        if (!snapshot) {
+            return false;
+        }
+        const position = Math.max(0, readNumber(snapshot.position) || 0);
+        return readNumber(snapshot.status) === 1 || position > 0;
+    }
+
     private isSpeakerPlaybackStopped(snapshot: SpeakerPlaybackSnapshot | null) {
         if (!snapshot) {
             return true;
@@ -6382,9 +7621,7 @@ class XiaoaiCloudPlugin {
         let relayHitCount = relayUsageBefore;
 
         const probePlaybackState = async (): Promise<SpeakerPlaybackVerifyResult | null> => {
-            const current = this.readSpeakerPlaybackSnapshot(
-                await mina.playerGetStatus(deviceId).catch(() => undefined)
-            );
+            const current = await this.readSpeakerPlaybackSnapshotWithTiming(mina, deviceId);
             if (options?.relayUrl) {
                 const usage = this.readAudioRelayUsageForUrl(options.relayUrl);
                 if (usage) {
@@ -6468,9 +7705,7 @@ class XiaoaiCloudPlugin {
             if (delayMs > 0) {
                 await sleep(delayMs);
             }
-            lastSnapshot = this.readSpeakerPlaybackSnapshot(
-                await mina.playerGetStatus(deviceId).catch(() => undefined)
-            );
+            lastSnapshot = await this.readSpeakerPlaybackSnapshotWithTiming(mina, deviceId);
             if (predicate(lastSnapshot)) {
                 return {
                     ok: true,
@@ -6756,16 +7991,36 @@ class XiaoaiCloudPlugin {
             const useCachedSnapshot =
                 typeof cachedSnapshotAgeMs === "number" &&
                 cachedSnapshotAgeMs <= EXTERNAL_AUDIO_LOOP_GUARD_SNAPSHOT_FRESH_MS;
+            let statusProbeMs: number | undefined;
+            let statusProbeTimedOut = false;
             const snapshot = useCachedSnapshot
                 ? guard.lastSnapshot || null
-                : this.readSpeakerPlaybackSnapshot(
-                    await Promise.race([
-                        mina.playerGetStatus(deviceId).catch(() => undefined),
+                : await (async () => {
+                    const statusProbeStartedAtMs = Date.now();
+                    const statusResponsePromise = mina
+                        .playerGetStatus(deviceId)
+                        .catch(() => undefined);
+                    const timeoutMarker = Symbol("deadline-status-timeout");
+                    const statusResponse = await Promise.race<
+                        any | typeof timeoutMarker
+                    >([
+                        statusResponsePromise,
                         sleep(EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_STATUS_TIMEOUT_MS).then(
-                            () => undefined
+                            () => timeoutMarker
                         ),
-                    ])
-                );
+                    ]);
+                    if (statusResponse === timeoutMarker) {
+                        statusProbeTimedOut = true;
+                        return null;
+                    }
+                    statusProbeMs = Date.now() - statusProbeStartedAtMs;
+                    this.updateSpeakerAudioLatencyEstimate(
+                        deviceId,
+                        "statusProbeEstimateMs",
+                        statusProbeMs
+                    );
+                    return this.readSpeakerPlaybackSnapshot(statusResponse);
+                })();
             if (!this.readExternalAudioLoopGuard(deviceId, token)) {
                 return;
             }
@@ -6859,6 +8114,8 @@ class XiaoaiCloudPlugin {
                     silenced,
                     usedCachedSnapshot: useCachedSnapshot,
                     cachedSnapshotAgeMs,
+                    statusProbeMs,
+                    statusProbeTimedOut,
                 }
             );
         } catch (error) {
@@ -6957,13 +8214,22 @@ class XiaoaiCloudPlugin {
             }
 
             let deadlineAtMs = readNumber(guard.deadlineAtMs);
-            if (typeof deadlineAtMs !== "number" && guard.startedWithUrl) {
+            const stablePlaybackObserved =
+                seenPlaying ||
+                this.isSpeakerPlaybackActivelyPlaying(previousSnapshot) ||
+                this.isSpeakerPlaybackActivelyPlaying(guard.lastSnapshot || null);
+            if (
+                typeof deadlineAtMs !== "number" &&
+                guard.startedWithUrl &&
+                stablePlaybackObserved
+            ) {
                 const hostedRelayEntry = await this.ensureHostedAudioRelayEntry(
                     guard.startedWithUrl
                 );
                 const relayUsage = this.readAudioRelayUsageForUrl(guard.startedWithUrl);
                 const relayHitDeadlineAtMs =
                     this.computeRelayHitAnchoredExternalAudioDeadlineAtMs(
+                        deviceId,
                         hostedRelayEntry,
                         readNumber(relayUsage?.lastHitAtMs)
                     );
@@ -6979,13 +8245,13 @@ class XiaoaiCloudPlugin {
                         tailPaddingMs: readNumber(hostedRelayEntry?.tailPaddingMs),
                         relayHitAtMs: readNumber(relayUsage?.lastHitAtMs),
                         deadlineAtMs: relayHitDeadlineAtMs,
-                        source: "relay-hit",
+                        source: "relay-hit-after-stable-playback",
                     });
                     this.scheduleExternalAudioLoopGuardDeadline(
                         mina,
                         device,
                         token,
-                        "relay-hit"
+                        "relay-hit-after-stable-playback"
                     );
                 }
             }
@@ -7033,9 +8299,7 @@ class XiaoaiCloudPlugin {
                 return;
             }
 
-            const snapshot = this.readSpeakerPlaybackSnapshot(
-                await mina.playerGetStatus(deviceId).catch(() => undefined)
-            );
+            const snapshot = await this.readSpeakerPlaybackSnapshotWithTiming(mina, deviceId);
             if (!snapshot) {
                 continue;
             }
@@ -7055,7 +8319,7 @@ class XiaoaiCloudPlugin {
                 return;
             }
 
-            if (snapshot.status === 1) {
+            if (this.isSpeakerPlaybackActivelyPlaying(snapshot)) {
                 seenPlaying = true;
             }
 
@@ -7076,7 +8340,7 @@ class XiaoaiCloudPlugin {
                     : undefined;
                 const hostedRelayDurationMs = readNumber(hostedRelayEntry?.durationMs);
                 const { deadlineLeadMs, tailPaddingMs } =
-                    this.computeExternalAudioLoopGuardLeadMs(hostedRelayEntry);
+                    this.computeExternalAudioLoopGuardLeadMs(deviceId, hostedRelayEntry);
                 const dynamicDeadlineAtMs =
                     typeof hostedRelayDurationMs === "number" &&
                     hostedRelayDurationMs > 0
@@ -7148,8 +8412,9 @@ class XiaoaiCloudPlugin {
                 } else {
                     await mina.playerPause(deviceId).catch(() => undefined);
                 }
-                const pausedSnapshot = this.readSpeakerPlaybackSnapshot(
-                    await mina.playerGetStatus(deviceId).catch(() => undefined)
+                const pausedSnapshot = await this.readSpeakerPlaybackSnapshotWithTiming(
+                    mina,
+                    deviceId
                 );
                 await this.finishExternalAudioLoopGuard(
                     mina,
@@ -7415,7 +8680,7 @@ class XiaoaiCloudPlugin {
             expiresAtMs,
             hitCount: 0,
             durationMs: await this.probeLocalAudioDurationMs(filePath),
-            tailPaddingMs: AUDIO_RELAY_TAIL_SILENCE_MS,
+            tailPaddingMs: this.getAudioRelayTailPaddingMs(),
         } satisfies AudioRelayEntry;
     }
 
@@ -7424,6 +8689,7 @@ class XiaoaiCloudPlugin {
         options?: { transcodeToMp3?: boolean }
     ) {
         const relayId = randomBytes(12).toString("hex");
+        const localSourceUrl = await this.resolveLocalAudioSourceUrl(sourceUrl);
         const extension = options?.transcodeToMp3
             ? ".mp3"
             : this.normalizeAudioRelayExtension(sourceUrl);
@@ -7431,6 +8697,10 @@ class XiaoaiCloudPlugin {
         this.audioRelayEntries.set(relayId, {
             id: relayId,
             sourceUrl,
+            localSourceUrl:
+                localSourceUrl && localSourceUrl !== sourceUrl
+                    ? localSourceUrl
+                    : undefined,
             extension,
             transcodeToMp3: options?.transcodeToMp3 === true,
             createdAtMs: nowMs,
@@ -7531,6 +8801,220 @@ class XiaoaiCloudPlugin {
         return uniqueStrings(candidates);
     }
 
+    private async buildSilentCalibrationAudioBuffer(durationMs: number) {
+        const ffmpegAvailable = await this.probeFfmpegAvailability();
+        if (!ffmpegAvailable) {
+            throw new Error("本机缺少 ffmpeg，无法生成静音校准音频。");
+        }
+
+        const safeDurationMs = Math.max(200, Math.round(durationMs));
+        const process = spawn(
+            "ffmpeg",
+            [
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=mono:sample_rate=24000",
+                "-t",
+                (safeDurationMs / 1000).toFixed(3),
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "-f",
+                "mp3",
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "48k",
+                "pipe:1",
+            ],
+            {
+                stdio: ["ignore", "pipe", "pipe"],
+            }
+        );
+
+        const chunks: Buffer[] = [];
+        let totalBytes = 0;
+        let stderr = "";
+        const timeout = setTimeout(() => {
+            if (!process.killed) {
+                process.kill("SIGKILL");
+            }
+        }, AUDIO_STANDARDIZE_TIMEOUT_MS);
+
+        return await new Promise<Buffer>((resolve, reject) => {
+            const fail = (message: string) => {
+                clearTimeout(timeout);
+                if (!process.killed) {
+                    process.kill("SIGKILL");
+                }
+                reject(new Error(message));
+            };
+
+            process.on("error", (error) => {
+                fail(`静音校准音频生成失败: ${this.errorMessage(error)}`);
+            });
+
+            process.stderr.on("data", (chunk) => {
+                stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+                if (stderr.length > 2000) {
+                    stderr = stderr.slice(-2000);
+                }
+            });
+
+            process.stdout.on("data", (chunk) => {
+                const nextChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                totalBytes += nextChunk.length;
+                if (totalBytes > AUDIO_RELAY_MAX_BYTES) {
+                    fail("静音校准音频生成失败：输出体积过大。");
+                    return;
+                }
+                chunks.push(nextChunk);
+            });
+
+            process.on("close", (code, signal) => {
+                clearTimeout(timeout);
+                if (signal === "SIGKILL") {
+                    reject(new Error("静音校准音频生成失败：ffmpeg 超时或被中止。"));
+                    return;
+                }
+                if (code !== 0) {
+                    reject(
+                        new Error(
+                            [
+                                "静音校准音频生成失败",
+                                `ffmpeg exited with code ${code ?? -1}`,
+                                stderr ? stderr.replace(/\s+/g, " ").trim() : undefined,
+                            ]
+                                .filter(Boolean)
+                                .join(": ")
+                        )
+                    );
+                    return;
+                }
+                const buffer = Buffer.concat(chunks);
+                if (buffer.length === 0) {
+                    reject(new Error("静音校准音频生成失败：ffmpeg 没有输出任何音频数据。"));
+                    return;
+                }
+                resolve(buffer);
+            });
+        });
+    }
+
+    private async buildSilentCalibrationRelayUrl(roundNumber: number, sampleDurationMs: number) {
+        const tailPaddingMs = this.getAudioRelayTailPaddingMs();
+        const totalDurationMs = sampleDurationMs + tailPaddingMs;
+        const buffer = await this.buildSilentCalibrationAudioBuffer(totalDurationMs);
+        const candidates = await this.buildBufferedAudioRelayCandidateUrls(buffer, {
+            extension: ".mp3",
+            contentType: "audio/mpeg",
+            sourceLabel: `audio-calibration-round-${roundNumber}`,
+            tailPaddingMs,
+        });
+        const relayUrl = candidates[0];
+        if (!relayUrl) {
+            throw new Error("静音校准音频已生成，但没有得到可供音箱访问的 relay URL。");
+        }
+        return relayUrl;
+    }
+
+    private async runSpeakerAudioCalibration() {
+        const config = await this.loadConfig(false);
+        const { device } = await this.ensureActionContext();
+        const tailPaddingMs = this.getAudioRelayTailPaddingMs(config);
+        const rounds = AUDIO_CALIBRATION_SAMPLE_DURATIONS_MS.slice();
+        const startedAt = new Date().toISOString();
+        let successCount = 0;
+        let failureCount = 0;
+        let lastError: string | undefined;
+
+        this.audioCalibrationRunning = true;
+        try {
+            await this.stopSpeaker({ fast: true }).catch(() => false);
+            await this.clearConsoleAudioPlaybackState().catch(() => undefined);
+            await sleep(200);
+
+            for (let index = 0; index < rounds.length; index += 1) {
+                const sampleDurationMs = rounds[index] || tailPaddingMs;
+                try {
+                    const relayUrl = await this.buildSilentCalibrationRelayUrl(
+                        index + 1,
+                        sampleDurationMs
+                    );
+                    await this.playAudioUrl(relayUrl, {
+                        title: `静音校准 ${index + 1}/${rounds.length}`,
+                        interrupt: true,
+                        ignoreRecentFailure: true,
+                        consoleEventKind: "console.audio-calibration",
+                        consoleEventTitle: "控制台静音校准",
+                    });
+                    const stopped =
+                        (await this.stopSpeaker({
+                            fast: true,
+                            preserveLoopGuard: false,
+                        }).catch(() => false)) ||
+                        (await this.stopSpeaker({
+                            preserveLoopGuard: false,
+                        }).catch(() => false));
+                    if (!stopped) {
+                        throw new Error("校准样本播放后未能及时停止音箱播放状态。");
+                    }
+                    successCount += 1;
+                } catch (error) {
+                    failureCount += 1;
+                    lastError = this.errorMessage(error) || "静音校准失败。";
+                } finally {
+                    await this.clearConsoleAudioPlaybackState().catch(() => undefined);
+                    await sleep(AUDIO_CALIBRATION_ROUND_SETTLE_MS);
+                }
+            }
+
+            const summary: PersistedAudioCalibrationSummary = {
+                deviceId: device.minaDeviceId,
+                deviceName: device.name,
+                rounds: rounds.length,
+                successCount,
+                failureCount,
+                tailPaddingMs,
+                startedAt,
+                completedAt: new Date().toISOString(),
+                lastError,
+                latencyProfile: this.serializeSpeakerAudioLatencyProfileForPersistence(
+                    this.readSpeakerAudioLatencyProfile(device.minaDeviceId)
+                ),
+            };
+            this.lastAudioCalibration = summary;
+            await this.persistResolvedProfile(config, this.device || device, false);
+
+            this.recordConsoleEvent(
+                "console.audio-calibration",
+                successCount > 0 ? "控制台静音校准完成" : "控制台静音校准失败",
+                [
+                    `设备：${device.name || device.minaDeviceId}`,
+                    `成功 ${successCount}/${rounds.length} 轮`,
+                    `空余延迟 ${tailPaddingMs}ms`,
+                    lastError ? `最后错误：${lastError}` : "",
+                ]
+                    .filter(Boolean)
+                    .join(" · "),
+                successCount > 0 ? "success" : "error"
+            );
+
+            if (successCount <= 0) {
+                throw new Error(lastError || "静音校准未能成功跑通任何一轮。");
+            }
+            return summary;
+        } finally {
+            this.audioCalibrationRunning = false;
+        }
+    }
+
     private isHostedAudioRelayUrl(url: string) {
         try {
             const parsed = new URL(url);
@@ -7579,13 +9063,98 @@ class XiaoaiCloudPlugin {
         return undefined;
     }
 
-    private computeExternalAudioLoopGuardLeadMs(entry?: AudioRelayEntry) {
+    private updateSpeakerAudioLatencyEstimate(
+        deviceId: string,
+        key:
+            | "statusProbeEstimateMs"
+            | "pauseSettleEstimateMs"
+            | "stopSettleEstimateMs"
+            | "playbackDetectEstimateMs",
+        observedMs?: number
+    ) {
+        const nextObservedMs = readNumber(observedMs);
+        if (
+            !deviceId ||
+            typeof nextObservedMs !== "number" ||
+            !Number.isFinite(nextObservedMs) ||
+            nextObservedMs <= 0
+        ) {
+            return undefined;
+        }
+        const boundedObservedMs = clamp(Math.round(nextObservedMs), 1, 10_000);
+        const current = this.speakerAudioLatencyProfiles.get(deviceId) || {
+            updatedAtMs: 0,
+        };
+        const previousEstimate = readNumber(current[key]);
+        const nextEstimate =
+            typeof previousEstimate === "number" && Number.isFinite(previousEstimate)
+                ? Math.max(
+                    boundedObservedMs,
+                    clamp(Math.round(previousEstimate * 0.92), 1, 10_000)
+                )
+                : boundedObservedMs;
+        const nextProfile: SpeakerAudioLatencyProfile = {
+            ...current,
+            [key]: nextEstimate,
+            updatedAtMs: Date.now(),
+        };
+        this.speakerAudioLatencyProfiles.set(deviceId, nextProfile);
+        return nextEstimate;
+    }
+
+    private readSpeakerAudioLatencyProfile(deviceId?: string) {
+        const normalizedDeviceId = readString(deviceId);
+        if (!normalizedDeviceId) {
+            return undefined;
+        }
+        return this.speakerAudioLatencyProfiles.get(normalizedDeviceId);
+    }
+
+    private computeDynamicExternalAudioLoopGuardBaseLeadMs(deviceId?: string) {
+        const profile = this.readSpeakerAudioLatencyProfile(deviceId);
+        const statusProbeEstimateMs = readNumber(profile?.statusProbeEstimateMs) || 0;
+        const pauseSettleEstimateMs = readNumber(profile?.pauseSettleEstimateMs) || 0;
+        const stopSettleEstimateMs = readNumber(profile?.stopSettleEstimateMs) || 0;
+        const playbackDetectEstimateMs = readNumber(profile?.playbackDetectEstimateMs) || 0;
+        const commandSettleEstimateMs = Math.max(
+            pauseSettleEstimateMs,
+            stopSettleEstimateMs
+        );
+        const leadMs = Math.max(
+            EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_LEAD_MS,
+            commandSettleEstimateMs + statusProbeEstimateMs + 120,
+            Math.round(playbackDetectEstimateMs * 0.6) + statusProbeEstimateMs + 120
+        );
+        return clamp(leadMs, EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_LEAD_MS, 1800);
+    }
+
+    private async readSpeakerPlaybackSnapshotWithTiming(
+        mina: MiNAClient,
+        deviceId: string
+    ) {
+        const startedAtMs = Date.now();
+        const snapshot = this.readSpeakerPlaybackSnapshot(
+            await mina.playerGetStatus(deviceId).catch(() => undefined)
+        );
+        this.updateSpeakerAudioLatencyEstimate(
+            deviceId,
+            "statusProbeEstimateMs",
+            Date.now() - startedAtMs
+        );
+        return snapshot;
+    }
+
+    private computeExternalAudioLoopGuardLeadMs(
+        deviceId?: string,
+        entry?: AudioRelayEntry
+    ) {
+        const dynamicBaseLeadMs = this.computeDynamicExternalAudioLoopGuardBaseLeadMs(deviceId);
         const tailPaddingMs = readNumber(entry?.tailPaddingMs);
         if (typeof tailPaddingMs === "number" && tailPaddingMs > 0) {
             return {
                 tailPaddingMs,
                 deadlineLeadMs: Math.max(
-                    EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_LEAD_MS,
+                    dynamicBaseLeadMs,
                     Math.max(
                         0,
                         tailPaddingMs - EXTERNAL_AUDIO_LOOP_GUARD_TAIL_PADDING_RESERVE_MS
@@ -7595,11 +9164,12 @@ class XiaoaiCloudPlugin {
         }
         return {
             tailPaddingMs: undefined,
-            deadlineLeadMs: EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_LEAD_MS,
+            deadlineLeadMs: dynamicBaseLeadMs,
         };
     }
 
     private computeRelayHitAnchoredExternalAudioDeadlineAtMs(
+        deviceId?: string,
         entry?: AudioRelayEntry,
         relayHitAtMs?: number
     ) {
@@ -7613,7 +9183,7 @@ class XiaoaiCloudPlugin {
             return undefined;
         }
 
-        const { deadlineLeadMs } = this.computeExternalAudioLoopGuardLeadMs(entry);
+        const { deadlineLeadMs } = this.computeExternalAudioLoopGuardLeadMs(deviceId, entry);
         return anchoredAtMs + Math.max(0, durationMs - deadlineLeadMs);
     }
 
@@ -7664,6 +9234,101 @@ class XiaoaiCloudPlugin {
         return true;
     }
 
+    private async collectLocalAudioSourceCandidates(sourceUrl: string) {
+        const normalizedSourceUrl = normalizeRemoteMediaUrl(sourceUrl);
+        if (!normalizedSourceUrl) {
+            return [];
+        }
+
+        let parsed: URL;
+        try {
+            parsed = new URL(normalizedSourceUrl);
+        } catch {
+            return [normalizedSourceUrl];
+        }
+
+        const hostname = parsed.hostname.trim().toLowerCase();
+        if (!hostname || isLoopbackHostname(hostname) || isPrivateHostname(hostname)) {
+            return [normalizedSourceUrl];
+        }
+
+        const config = this.config || (await this.loadConfig(false).catch(() => undefined));
+        const knownSelfHosts = new Set<string>();
+        const addKnownHost = (value: string | undefined) => {
+            const normalized = normalizeBaseUrl(value);
+            if (!normalized) {
+                return;
+            }
+            try {
+                knownSelfHosts.add(new URL(normalized).hostname.trim().toLowerCase());
+            } catch {
+                // Ignore malformed base URLs here and keep collecting others.
+            }
+        };
+
+        addKnownHost(config?.audioPublicBaseUrl);
+        addKnownHost(config?.publicBaseUrl);
+        for (const gatewayBase of await discoverGatewayBaseUrls(this.api).catch(() => [])) {
+            addKnownHost(gatewayBase);
+        }
+        for (const localLanAddress of readLocalLanIpv4Addresses()) {
+            knownSelfHosts.add(localLanAddress.trim().toLowerCase());
+        }
+
+        if (!knownSelfHosts.has(hostname)) {
+            return [normalizedSourceUrl];
+        }
+
+        const candidates: string[] = [];
+        const addCandidate = (value: string | undefined) => {
+            const normalized = normalizeRemoteMediaUrl(value);
+            if (normalized) {
+                candidates.push(normalized);
+            }
+        };
+        const addLoopbackCandidate = (
+            loopbackHostname: string,
+            options?: { protocol?: "http:" | "https:"; clearPort?: boolean }
+        ) => {
+            try {
+                const candidate = new URL(parsed.toString());
+                candidate.hostname = loopbackHostname;
+                if (options?.protocol) {
+                    candidate.protocol = options.protocol;
+                }
+                if (options?.clearPort) {
+                    candidate.port = "";
+                }
+                addCandidate(candidate.toString());
+            } catch {
+                // Ignore invalid loopback rewrites and keep collecting others.
+            }
+        };
+
+        if (parsed.protocol === "https:") {
+            const clearPort = !parsed.port || parsed.port === "443";
+            addLoopbackCandidate("127.0.0.1", {
+                protocol: "http:",
+                clearPort,
+            });
+            addLoopbackCandidate("localhost", {
+                protocol: "http:",
+                clearPort,
+            });
+        } else {
+            addLoopbackCandidate("127.0.0.1");
+            addLoopbackCandidate("localhost");
+        }
+
+        addCandidate(normalizedSourceUrl);
+        return uniqueStrings(candidates);
+    }
+
+    private async resolveLocalAudioSourceUrl(sourceUrl: string) {
+        const candidates = await this.collectLocalAudioSourceCandidates(sourceUrl);
+        return candidates[0] || sourceUrl;
+    }
+
     private async probeFfmpegAvailability() {
         const nowMs = Date.now();
         if (
@@ -7710,7 +9375,10 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private async transcodeRemoteAudioToMp3Buffer(sourceUrl: string) {
+    private async transcodeRemoteAudioToMp3BufferOnce(
+        sourceUrl: string,
+        tailPaddingMs = this.getAudioRelayTailPaddingMs()
+    ) {
         const ffmpegAvailable = await this.probeFfmpegAvailability();
         if (!ffmpegAvailable) {
             throw new Error("本机缺少 ffmpeg，无法先在本地标准化音频。");
@@ -7729,7 +9397,7 @@ class XiaoaiCloudPlugin {
                 "-sn",
                 "-dn",
                 "-af",
-                `apad=pad_dur=${(AUDIO_RELAY_TAIL_SILENCE_MS / 1000).toFixed(3)}`,
+                `apad=pad_dur=${(tailPaddingMs / 1000).toFixed(3)}`,
                 "-f",
                 "mp3",
                 "-codec:a",
@@ -7812,9 +9480,42 @@ class XiaoaiCloudPlugin {
         });
     }
 
+    private async transcodeRemoteAudioToMp3Buffer(
+        sourceUrl: string,
+        tailPaddingMs = this.getAudioRelayTailPaddingMs()
+    ) {
+        const candidates = await this.collectLocalAudioSourceCandidates(sourceUrl);
+        const failures: string[] = [];
+
+        for (const candidateUrl of candidates) {
+            try {
+                const buffer = await this.transcodeRemoteAudioToMp3BufferOnce(
+                    candidateUrl,
+                    tailPaddingMs
+                );
+                if (candidateUrl !== sourceUrl) {
+                    void this.appendDebugTrace("audio_source_rewritten_for_local_fetch", {
+                        sourceUrl,
+                        candidateUrl,
+                    });
+                }
+                return buffer;
+            } catch (error) {
+                failures.push(`${candidateUrl}: ${this.errorMessage(error)}`);
+            }
+        }
+
+        throw new Error(
+            failures.length > 0
+                ? failures.join(" | ")
+                : "本地标准化音频失败：没有可用的本地抓取地址。"
+        );
+    }
+
     private async transcodeBufferedAudioToMp3Buffer(
         sourceBuffer: Buffer,
-        sourceExtension?: string
+        sourceExtension?: string,
+        tailPaddingMs = this.getAudioRelayTailPaddingMs()
     ) {
         const ffmpegAvailable = await this.probeFfmpegAvailability();
         if (!ffmpegAvailable) {
@@ -7841,7 +9542,7 @@ class XiaoaiCloudPlugin {
             "-sn",
             "-dn",
             "-af",
-            `apad=pad_dur=${(AUDIO_RELAY_TAIL_SILENCE_MS / 1000).toFixed(3)}`,
+            `apad=pad_dur=${(tailPaddingMs / 1000).toFixed(3)}`,
             "-f",
             "mp3",
             "-codec:a",
@@ -7983,7 +9684,10 @@ class XiaoaiCloudPlugin {
 
     private buildTtsBridgeCacheKey(text: string) {
         return createHash("sha1")
-            .update(`${TTS_BRIDGE_CACHE_FORMAT_VERSION}\0${text.trim()}`, "utf8")
+            .update(
+                `${TTS_BRIDGE_CACHE_FORMAT_VERSION}\0${text.trim()}\0${this.getAudioRelayTailPaddingMs()}`,
+                "utf8"
+            )
             .digest("hex");
     }
 
@@ -8255,15 +9959,19 @@ class XiaoaiCloudPlugin {
             };
         }
 
+        const tailPaddingMs = this.getAudioRelayTailPaddingMs();
         try {
-            const standardizedBuffer = await this.transcodeRemoteAudioToMp3Buffer(sourceUrl);
+            const standardizedBuffer = await this.transcodeRemoteAudioToMp3Buffer(
+                sourceUrl,
+                tailPaddingMs
+            );
             const relayUrls = await this.buildBufferedAudioRelayCandidateUrls(
                 standardizedBuffer,
                 {
                     extension: ".mp3",
                     contentType: "audio/mpeg",
                     sourceLabel: this.normalizeAudioReplyTitle(options?.title) || sourceUrl,
-                    tailPaddingMs: AUDIO_RELAY_TAIL_SILENCE_MS,
+                    tailPaddingMs,
                 }
             );
             if (relayUrls.length === 0) {
@@ -8431,17 +10139,58 @@ class XiaoaiCloudPlugin {
         text: string,
         options?: { title?: string }
     ) {
+        const reachableBases = await this.computeSpeakerReachableAudioRelayBaseUrls();
+        if (reachableBases.length === 0) {
+            throw new Error(
+                "当前没有可供音箱访问的音频入口。请配置 audioPublicBaseUrl，或让 OpenClaw 网关通过局域网地址可被音箱直接访问。"
+            );
+        }
         const generated = await this.getOrCreateOpenclawTtsAsset(text);
         const relayUrls = await this.buildBufferedAudioRelayCandidateUrls(generated.audioBuffer, {
             extension: generated.audioExtension,
             contentType: contentTypeForAudioExtension(generated.audioExtension),
             sourceLabel: this.normalizeAudioReplyTitle(options?.title) || text,
-            tailPaddingMs: AUDIO_RELAY_TAIL_SILENCE_MS,
+            tailPaddingMs: this.getAudioRelayTailPaddingMs(),
         });
         if (relayUrls.length === 0) {
             throw new Error("TTS 桥接失败：没有可用的本地音频 relay 地址。");
         }
         return relayUrls[0];
+    }
+
+    private async finalizeSpokenToolReply(
+        text: string,
+        options?: {
+            consoleEventKind?: string;
+            consoleEventTitle?: string;
+            notificationLabel?: string;
+        }
+    ) {
+        await this.playText(text);
+        this.lastOpenclawSpeech = {
+            text,
+            timeMs: Date.now(),
+        };
+        this.lastOpenclawSpeakTime = Date.now() / 1000;
+        this.armDialogWindow(this.lastOpenclawSpeakTime);
+        this.recordVoiceContextTurn("assistant", text);
+        this.recordConsoleEvent(
+            options?.consoleEventKind || "tool.speak",
+            options?.consoleEventTitle || "OpenClaw 让小爱播报",
+            text,
+            "success"
+        );
+        void this.sendOpenclawNotification(
+            text,
+            options?.notificationLabel || "播报回传",
+            {
+                bestEffort: true,
+            }
+        ).catch((error) => {
+            console.warn(
+                `[XiaoAI Cloud] ${options?.notificationLabel || "播报回传"}失败: ${this.errorMessage(error)}`
+            );
+        });
     }
 
     private generateExternalAudioId() {
@@ -8524,7 +10273,8 @@ class XiaoaiCloudPlugin {
         entry: AudioRelayEntry,
         requestMethod: string
     ) {
-        if (!entry.sourceUrl) {
+        const upstreamSourceUrl = entry.localSourceUrl || entry.sourceUrl;
+        if (!upstreamSourceUrl) {
             sendText(response, 404, "Audio relay source is missing");
             return true;
         }
@@ -8553,7 +10303,7 @@ class XiaoaiCloudPlugin {
                 "-loglevel",
                 "error",
                 "-i",
-                entry.sourceUrl,
+                upstreamSourceUrl,
                 "-vn",
                 "-sn",
                 "-dn",
@@ -8789,7 +10539,8 @@ class XiaoaiCloudPlugin {
                 requestMethod
             );
         }
-        if (!entry.sourceUrl) {
+        const upstreamSourceUrl = entry.localSourceUrl || entry.sourceUrl;
+        if (!upstreamSourceUrl) {
             sendText(response, 404, "Audio relay source is missing");
             return true;
         }
@@ -8807,7 +10558,7 @@ class XiaoaiCloudPlugin {
             if (ifRangeHeader) {
                 requestHeaders["If-Range"] = ifRangeHeader;
             }
-            upstream = await fetch(entry.sourceUrl, {
+            upstream = await fetch(upstreamSourceUrl, {
                 method: requestMethod,
                 redirect: "follow",
                 headers: requestHeaders,
@@ -8903,8 +10654,9 @@ class XiaoaiCloudPlugin {
         }
 
         const { device, mina } = await this.ensureActionContext();
-        const initialBeforePlayback = this.readSpeakerPlaybackSnapshot(
-            await mina.playerGetStatus(device.minaDeviceId).catch(() => undefined)
+        const initialBeforePlayback = await this.readSpeakerPlaybackSnapshotWithTiming(
+            mina,
+            device.minaDeviceId
         );
         const shouldInterruptCurrentPlayback =
             options?.interrupt !== false &&
@@ -8941,9 +10693,10 @@ class XiaoaiCloudPlugin {
             device.minaDeviceId
         )?.restoreLoopType;
         const beforePlayback = shouldInterruptCurrentPlayback
-            ? this.readSpeakerPlaybackSnapshot(
-                await mina.playerGetStatus(device.minaDeviceId).catch(() => undefined)
-            ) || initialBeforePlayback
+            ? (await this.readSpeakerPlaybackSnapshotWithTiming(
+                mina,
+                device.minaDeviceId
+            )) || initialBeforePlayback
             : initialBeforePlayback;
         const beforePlaybackLoopType = readNumber(beforePlayback?.loopType);
         let externalAudioLoopTypeForced = false;
@@ -9158,6 +10911,17 @@ class XiaoaiCloudPlugin {
 
         const detail = this.describeAudioReply(requestedUrl, options?.title);
         if (usedStrategy) {
+            if (
+                typeof playbackAcceptedAtMs === "number" &&
+                typeof playbackObservedAtMs === "number" &&
+                playbackObservedAtMs >= playbackAcceptedAtMs
+            ) {
+                this.updateSpeakerAudioLatencyEstimate(
+                    device.minaDeviceId,
+                    "playbackDetectEstimateMs",
+                    playbackObservedAtMs - playbackAcceptedAtMs
+                );
+            }
             const restoreLoopType =
                 typeof inheritedLoopRestoreType === "number"
                     ? inheritedLoopRestoreType
@@ -9177,20 +10941,25 @@ class XiaoaiCloudPlugin {
                 : undefined;
             const relayDurationMs = readNumber(hostedRelayEntry?.durationMs);
             const { deadlineLeadMs, tailPaddingMs } =
-                this.computeExternalAudioLoopGuardLeadMs(hostedRelayEntry);
+                this.computeExternalAudioLoopGuardLeadMs(
+                    device.minaDeviceId,
+                    hostedRelayEntry
+                );
             const initialSnapshotDuration = readNumber(initialPlaybackSnapshot?.duration);
             const initialSnapshotPosition = Math.max(
                 0,
                 readNumber(initialPlaybackSnapshot?.position) || 0
             );
             const initialSnapshotActivelyPlaying =
-                readNumber(initialPlaybackSnapshot?.status) === 1 ||
-                initialSnapshotPosition > 0;
+                this.isSpeakerPlaybackActivelyPlaying(initialPlaybackSnapshot);
             const relayHitDeadlineAtMs =
-                this.computeRelayHitAnchoredExternalAudioDeadlineAtMs(
-                    hostedRelayEntry,
-                    readNumber(hostedRelayUsage?.lastHitAtMs)
-                );
+                initialSnapshotActivelyPlaying
+                    ? this.computeRelayHitAnchoredExternalAudioDeadlineAtMs(
+                        device.minaDeviceId,
+                        hostedRelayEntry,
+                        readNumber(hostedRelayUsage?.lastHitAtMs)
+                    )
+                    : undefined;
             const observedPlaybackDeadlineAtMs =
                 !initialSnapshotActivelyPlaying
                     ? undefined
@@ -9293,6 +11062,9 @@ class XiaoaiCloudPlugin {
                 startedByRelayHit: verifyResult?.startedByRelayHit,
                 relayHitObserved: verifyResult?.relayHitObserved,
                 relayHitCount: verifyResult?.relayHitCount,
+                latencyProfile: this.readSpeakerAudioLatencyProfile(
+                    device.minaDeviceId
+                ),
                 snapshot: effectivePlaybackSnapshot,
                 attempts: attemptDiagnostics,
             });
@@ -9698,6 +11470,10 @@ class XiaoaiCloudPlugin {
         const storedMuteState = await this.getStoredSpeakerMuteState(device).catch(
             () => ({} as PersistedSpeakerMuteState)
         );
+        const effectiveStoredMuteState = this.mergePendingSoftMuteState(
+            storedMuteState,
+            this.getPendingVolumeSnapshot()
+        );
 
         if (device.speakerFeatures.volume) {
             const prop = device.speakerFeatures.volume;
@@ -9715,17 +11491,17 @@ class XiaoaiCloudPlugin {
                 const pct = normalizeSpeakerVolumePercent(value, prop.min, prop.max);
                 const deviceMuted = muteFeature ? readBoolean(results[1]?.value) : undefined;
                 const softMuteState =
-                    storedMuteState.mode === "soft-volume"
+                    effectiveStoredMuteState.mode === "soft-volume"
                         ? await this.resolveSoftVolumeObservedState(
                             device,
-                            storedMuteState,
+                            effectiveStoredMuteState,
                             pct,
                             deviceMuted
                         )
                         : null;
                 return this.buildObservedVolumeSnapshot(
                     device,
-                    storedMuteState,
+                    effectiveStoredMuteState,
                     pct,
                     value,
                     "miot",
@@ -9758,17 +11534,17 @@ class XiaoaiCloudPlugin {
                 deviceMuted = readBoolean(muteResult?.[0]?.value);
             }
             const softMuteState =
-                storedMuteState.mode === "soft-volume"
+                effectiveStoredMuteState.mode === "soft-volume"
                     ? await this.resolveSoftVolumeObservedState(
                         device,
-                        storedMuteState,
+                        effectiveStoredMuteState,
                         pct,
                         deviceMuted
                     )
                     : null;
             return this.buildObservedVolumeSnapshot(
                 device,
-                storedMuteState,
+                effectiveStoredMuteState,
                 pct,
                 volume,
                 "mina",
@@ -10019,6 +11795,7 @@ class XiaoaiCloudPlugin {
     private async pauseSpeaker() {
         const { device, mina, miio } = await this.ensureActionContext();
         try {
+            let lastPauseAttemptStartedAtMs = Date.now();
             await this.sendPauseCommand(device, mina, miio);
             let settled = await this.verifySpeakerCommandState(
                 mina,
@@ -10026,9 +11803,15 @@ class XiaoaiCloudPlugin {
                 (snapshot) => this.isSpeakerPlaybackPausedOrStopped(snapshot)
             );
             if (settled.ok) {
+                this.updateSpeakerAudioLatencyEstimate(
+                    device.minaDeviceId,
+                    "pauseSettleEstimateMs",
+                    Date.now() - lastPauseAttemptStartedAtMs
+                );
                 return true;
             }
 
+            lastPauseAttemptStartedAtMs = Date.now();
             await this.sendPauseCommand(device, mina, miio);
             settled = await this.verifySpeakerCommandState(
                 mina,
@@ -10036,6 +11819,11 @@ class XiaoaiCloudPlugin {
                 (snapshot) => this.isSpeakerPlaybackPausedOrStopped(snapshot)
             );
             if (settled.ok) {
+                this.updateSpeakerAudioLatencyEstimate(
+                    device.minaDeviceId,
+                    "pauseSettleEstimateMs",
+                    Date.now() - lastPauseAttemptStartedAtMs
+                );
                 return true;
             }
 
@@ -10118,6 +11906,7 @@ class XiaoaiCloudPlugin {
         const { device, mina, miio } = await this.ensureActionContext();
         try {
             if (options?.fast) {
+                const fastPauseStartedAtMs = Date.now();
                 let pauseAccepted = false;
                 let pauseError: string | undefined;
                 try {
@@ -10130,6 +11919,32 @@ class XiaoaiCloudPlugin {
                 }
 
                 if (pauseAccepted) {
+                    void this.verifySpeakerCommandState(
+                        mina,
+                        device.minaDeviceId,
+                        (snapshot) =>
+                            this.isSpeakerPlaybackPausedOrStopped(snapshot) ||
+                            Boolean(
+                                readString(options.expectedAudioId) &&
+                                    snapshot &&
+                                    !this.speakerSnapshotHasAudioId(
+                                        snapshot,
+                                        readString(options.expectedAudioId)
+                                    )
+                            ),
+                        SPEAKER_COMMAND_FAST_VERIFY_DELAYS_MS
+                    )
+                        .then((fastPauseSettled) => {
+                            if (!fastPauseSettled.ok) {
+                                return;
+                            }
+                            this.updateSpeakerAudioLatencyEstimate(
+                                device.minaDeviceId,
+                                "pauseSettleEstimateMs",
+                                Date.now() - fastPauseStartedAtMs
+                            );
+                        })
+                        .catch(() => undefined);
                     await this.finalizeSpeakerStopSuccess(
                         mina,
                         device.minaDeviceId,
@@ -10152,6 +11967,11 @@ class XiaoaiCloudPlugin {
                     SPEAKER_COMMAND_FAST_VERIFY_DELAYS_MS
                 );
                 if (fastSettled.ok) {
+                    this.updateSpeakerAudioLatencyEstimate(
+                        device.minaDeviceId,
+                        "pauseSettleEstimateMs",
+                        Date.now() - fastPauseStartedAtMs
+                    );
                     await this.finalizeSpeakerStopSuccess(mina, device.minaDeviceId, options);
                     return true;
                 }
@@ -10164,6 +11984,7 @@ class XiaoaiCloudPlugin {
             }
 
             let firstStopError: string | undefined;
+            let stopAttemptStartedAtMs = Date.now();
             await this.sendStopCommand(device, mina, miio).catch((error) => {
                 firstStopError = this.errorMessage(error);
             });
@@ -10173,6 +11994,7 @@ class XiaoaiCloudPlugin {
                 (snapshot) => this.isSpeakerPlaybackStopped(snapshot)
             );
             if (!settled.ok) {
+                stopAttemptStartedAtMs = Date.now();
                 await this.sendPauseCommand(device, mina, miio).catch(() => undefined);
                 await this.sendStopCommand(device, mina, miio).catch(() => undefined);
                 settled = await this.verifySpeakerCommandState(
@@ -10189,6 +12011,11 @@ class XiaoaiCloudPlugin {
                 });
                 return false;
             }
+            this.updateSpeakerAudioLatencyEstimate(
+                device.minaDeviceId,
+                "stopSettleEstimateMs",
+                Date.now() - stopAttemptStartedAtMs
+            );
             await this.finalizeSpeakerStopSuccess(mina, device.minaDeviceId, options);
             return true;
         } catch {
@@ -11061,6 +12888,9 @@ class XiaoaiCloudPlugin {
         options?: { bestEffort?: boolean }
     ) {
         const config = await this.loadConfig(false);
+        if (config.openclawNotificationsDisabled) {
+            return false;
+        }
         if (!config.openclawTo) {
             throw new Error("缺少 openclawTo 配置，无法把登录入口或语音转发给 OpenClaw。");
         }
@@ -11472,26 +13302,10 @@ class XiaoaiCloudPlugin {
                 console.log(`<- [播报指令/云端] ${params.text}`);
                 this.markActiveVoiceAgentSpoken(params.text);
                 this.waitingForResponse = false;
-                await this.playText(params.text);
-                this.lastOpenclawSpeech = {
-                    text: params.text,
-                    timeMs: Date.now(),
-                };
-                this.lastOpenclawSpeakTime = Date.now() / 1000;
-                this.armDialogWindow(this.lastOpenclawSpeakTime);
-                this.recordVoiceContextTurn("assistant", params.text);
-                this.recordConsoleEvent(
-                    "tool.speak",
-                    "OpenClaw 让小爱播报",
-                    params.text,
-                    "success"
-                );
-                void this.sendOpenclawNotification(params.text, "播报回传", {
-                    bestEffort: true,
-                }).catch((error) => {
-                    console.warn(
-                        `[XiaoAI Cloud] 播报回传失败: ${this.errorMessage(error)}`
-                    );
+                await this.finalizeSpokenToolReply(params.text, {
+                    consoleEventKind: "tool.speak",
+                    consoleEventTitle: "OpenClaw 让小爱播报",
+                    notificationLabel: "播报回传",
                 });
                 return { content: [{ type: "text", text: `[SYSTEM]播报完成: ${params.text}` }] };
             },
@@ -11574,22 +13388,48 @@ class XiaoaiCloudPlugin {
                 console.log(`<- [TTS桥接/云端] ${text}`);
                 this.markActiveVoiceAgentSpoken(text);
                 this.waitingForResponse = false;
-                const playbackUrl = await this.synthesizeOpenclawTtsToRelayUrl(text, {
-                    title: params.title || text,
-                });
-                const played = await this.playAudioUrl(playbackUrl, {
-                    title: readString(params.title) || text,
-                    interrupt: false,
-                    armDialogWindow: true,
-                    consoleEventKind: "tool.tts-audio",
-                    consoleEventTitle: "OpenClaw TTS 桥接播放",
-                });
-                return {
-                    content: [{
-                        type: "text",
-                        text: `[SYSTEM]TTS 音频已开始播放: ${played.detail}`,
-                    }],
-                };
+                try {
+                    const playbackUrl = await this.synthesizeOpenclawTtsToRelayUrl(text, {
+                        title: params.title || text,
+                    });
+                    const played = await this.playAudioUrl(playbackUrl, {
+                        title: readString(params.title) || text,
+                        interrupt: false,
+                        armDialogWindow: true,
+                        consoleEventKind: "tool.tts-audio",
+                        consoleEventTitle: "OpenClaw TTS 桥接播放",
+                    });
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `[SYSTEM]TTS 音频已开始播放: ${played.detail}`,
+                        }],
+                    };
+                } catch (error) {
+                    const reason = this.errorMessage(error);
+                    await this.appendDebugTrace("tts_bridge_fallback_to_speak", {
+                        text,
+                        title: readString(params.title) || text,
+                        reason,
+                    });
+                    this.recordConsoleEvent(
+                        "tool.tts-audio",
+                        "OpenClaw TTS 桥接改为文本播报",
+                        reason,
+                        "warn"
+                    );
+                    await this.finalizeSpokenToolReply(text, {
+                        consoleEventKind: "tool.speak",
+                        consoleEventTitle: "OpenClaw TTS 桥接改为文本播报",
+                        notificationLabel: "播报回传",
+                    });
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `[SYSTEM]TTS 音频链路不可用，已自动改为文本播报: ${text}`,
+                        }],
+                    };
+                }
             },
         });
 
@@ -11904,7 +13744,7 @@ class XiaoaiCloudPlugin {
                             `初始化状态: ${loginState}\n` +
                             `账号: ${maskAccountLabel(config?.account) || "未保存"}\n` +
                             `云端区域: ${config?.serverCountry || "?"}\n` +
-                            `OpenClaw 路由: ${(config?.openclawAgent || "main")} -> ${config?.openclawChannel || "?"}/${config?.openclawTo || "未配置"}\n` +
+                            `OpenClaw 路由: ${(config?.openclawAgent || "main")} -> ${config?.openclawChannel || "?"}/${config?.openclawNotificationsDisabled ? "已关闭通知" : config?.openclawTo || "未配置"}\n` +
                             `打开思考: ${config?.openclawThinkingOff ? "关闭" : "打开"}\n` +
                             `强制非流式: ${config?.openclawForceNonStreaming ? "开启" : "关闭"}\n` +
                             `上下文记忆: ${config?.voiceContextMaxTurns ?? DEFAULT_VOICE_CONTEXT_MAX_TURNS}轮 / ${config?.voiceContextMaxChars ?? DEFAULT_VOICE_CONTEXT_MAX_CHARS}字\n` +
@@ -12031,6 +13871,268 @@ class XiaoaiCloudPlugin {
                     content: [{
                         type: "text",
                         text: `[SYSTEM]对话窗口已从 ${result.previousSeconds}秒 调整为 ${result.seconds}秒`,
+                    }],
+                };
+            },
+        });
+
+        this.api.registerTool({
+            name: "xiaoai_update_settings",
+            description:
+                "批量修改小爱插件的高级设置。适合调整通知渠道、OpenClaw 模型、thinking、非流式、workspace 提示文件、过渡播报词、调试日志和上下文记忆等控制台配置。",
+            parameters: schemaObject(
+                {
+                    channel: schemaString({
+                        description: "插件通知渠道，例如 qqbot、telegram。只影响登录通知和控制台链接回推，不影响小爱对话仍走 xiaoai agent。",
+                    }),
+                    target: schemaString({
+                        description: "通知目标；留空时会尝试按当前渠道自动推断唯一目标。",
+                    }),
+                    disableNotification: schemaBoolean({
+                        description: "是否关闭插件通知渠道。true 为关闭；关闭后不影响小爱对话转发。",
+                    }),
+                    model: schemaString({
+                        description: "xiaoai 专属 agent 要切换到的 OpenClaw 模型，例如 openai/gpt-5.4。",
+                    }),
+                    audioTailPaddingMs: schemaNumber({
+                        description:
+                            "音频播放链路的尾部留白空余延迟，单位毫秒。会影响 relay/TTS 音频补白和二次播放拦截时机。",
+                    }),
+                    thinkingEnabled: schemaBoolean({
+                        description: "是否打开 thinking。true 为打开，false 为关闭。",
+                    }),
+                    forceNonStreamingEnabled: schemaBoolean({
+                        description: "是否开启强制非流式请求。",
+                    }),
+                    dialogWindowSeconds: schemaNumber({
+                        description: "唤醒模式下的免唤醒对话窗口时长，单位秒。",
+                    }),
+                    debugLogEnabled: schemaBoolean({
+                        description: "是否开启小米网络调试日志。",
+                    }),
+                    voiceContextTurns: schemaNumber({
+                        description: "上下文记忆保留轮数，0 表示关闭。",
+                    }),
+                    voiceContextChars: schemaNumber({
+                        description: "上下文记忆最大字符数，0 表示关闭。",
+                    }),
+                    voiceSystemPrompt: schemaString({
+                        description: "写入 xiaoai agent workspace 的 AGENTS.md 内容；传空字符串可恢复默认。",
+                    }),
+                    workspaceFile: schemaString({
+                        description:
+                            "要修改的 xiaoai agent workspace 文件，可填 agents、identity、tools、heartbeat、boot、memory，或对应的 .md 文件名。",
+                    }),
+                    workspaceFileContent: schemaString({
+                        description:
+                            "写入 workspaceFile 指向文件的内容；传空字符串会恢复该文件默认内容并保持启用。",
+                    }),
+                    disableWorkspaceFile: schemaBoolean({
+                        description:
+                            "是否禁用 workspaceFile 指向的文件。true 为禁用；false 为恢复默认内容并重新启用。AGENTS.md 不支持禁用。",
+                    }),
+                    transitionPhrasesText: schemaString({
+                        description: "过渡播报词文本，一行一个；传空字符串可恢复默认。",
+                    }),
+                },
+                { required: [] }
+            ),
+            execute: async (
+                _id: string,
+                params: {
+                    channel?: string;
+                    target?: string;
+                    disableNotification?: boolean;
+                    model?: string;
+                    audioTailPaddingMs?: number;
+                    thinkingEnabled?: boolean;
+                    forceNonStreamingEnabled?: boolean;
+                    dialogWindowSeconds?: number;
+                    debugLogEnabled?: boolean;
+                    voiceContextTurns?: number;
+                    voiceContextChars?: number;
+                    voiceSystemPrompt?: string;
+                    workspaceFile?: string;
+                    workspaceFileContent?: string;
+                    disableWorkspaceFile?: boolean;
+                    transitionPhrasesText?: string;
+                }
+            ) => {
+                const summary: string[] = [];
+                let gatewayRestarting = false;
+                const hasWorkspaceFileUpdate =
+                    Object.prototype.hasOwnProperty.call(
+                        params,
+                        "workspaceFileContent"
+                    ) || typeof params.disableWorkspaceFile === "boolean";
+                const workspaceFileRef = readString(params.workspaceFile);
+                const workspaceFileDefinition = workspaceFileRef
+                    ? findOpenclawWorkspaceFileDefinition(workspaceFileRef)
+                    : undefined;
+
+                const hasRouteUpdate =
+                    typeof params.disableNotification === "boolean" ||
+                    typeof params.channel === "string" ||
+                    typeof params.target === "string";
+                if (hasRouteUpdate) {
+                    const result = await this.updateOpenclawNotificationRoute({
+                        channel: params.channel,
+                        target: params.target,
+                        disableNotification: params.disableNotification,
+                    });
+                    summary.push(
+                        result.enabled
+                            ? `通知渠道已改为 ${result.channel}/${result.target}`
+                            : "插件通知已关闭"
+                    );
+                }
+
+                if (typeof params.dialogWindowSeconds === "number") {
+                    const result = await this.updateDialogWindowSeconds(
+                        params.dialogWindowSeconds
+                    );
+                    summary.push(`对话窗口 ${result.seconds} 秒`);
+                }
+
+                if (typeof params.audioTailPaddingMs === "number") {
+                    const result = await this.updateAudioTailPaddingMs(
+                        params.audioTailPaddingMs
+                    );
+                    summary.push(`空余延迟 ${result.tailPaddingMs} ms`);
+                }
+
+                if (typeof params.thinkingEnabled === "boolean") {
+                    const result = await this.updateOpenclawThinkingOff(
+                        !params.thinkingEnabled
+                    );
+                    summary.push(result.enabled ? "thinking 已关闭" : "thinking 已打开");
+                }
+
+                if (typeof params.forceNonStreamingEnabled === "boolean") {
+                    const result = await this.updateOpenclawForceNonStreaming(
+                        params.forceNonStreamingEnabled
+                    );
+                    gatewayRestarting = gatewayRestarting || result.restarting;
+                    summary.push(
+                        result.enabled ? "已开启强制非流式" : "已关闭强制非流式"
+                    );
+                }
+
+                const model = readString(params.model);
+                if (model) {
+                    const result = await this.updateOpenclawAgentModel(model);
+                    gatewayRestarting = gatewayRestarting || result.restarting;
+                    summary.push(`模型已切到 ${result.model}`);
+                }
+
+                if (typeof params.debugLogEnabled === "boolean") {
+                    const result = await this.updateDebugLogEnabled(
+                        params.debugLogEnabled
+                    );
+                    summary.push(
+                        result.enabled ? "已开启调试日志" : "已关闭调试日志"
+                    );
+                }
+
+                if (
+                    typeof params.voiceContextTurns === "number" ||
+                    typeof params.voiceContextChars === "number"
+                ) {
+                    const config = await this.loadConfig(false);
+                    const result = await this.updateVoiceContextLimits(
+                        typeof params.voiceContextTurns === "number"
+                            ? params.voiceContextTurns
+                            : config.voiceContextMaxTurns,
+                        typeof params.voiceContextChars === "number"
+                            ? params.voiceContextChars
+                            : config.voiceContextMaxChars
+                    );
+                    summary.push(
+                        `上下文记忆 ${result.turns} 轮 / ${result.chars} 字`
+                    );
+                }
+
+                if (
+                    Object.prototype.hasOwnProperty.call(params, "voiceSystemPrompt") &&
+                    !(hasWorkspaceFileUpdate && workspaceFileDefinition?.id === "agents")
+                ) {
+                    const result = await this.updateOpenclawVoiceSystemPrompt(
+                        params.voiceSystemPrompt
+                    );
+                    summary.push(
+                        result.customized
+                            ? `已更新 ${OPENCLAW_AGENT_PROMPT_FILENAME}`
+                            : `已恢复默认 ${OPENCLAW_AGENT_PROMPT_FILENAME}`
+                    );
+                }
+
+                if (hasWorkspaceFileUpdate) {
+                    if (!workspaceFileRef) {
+                        throw new Error(
+                            "修改 workspace 文件时必须同时提供 workspaceFile。"
+                        );
+                    }
+                    const result = await this.updateOpenclawWorkspaceFile(
+                        workspaceFileRef,
+                        {
+                            content: params.workspaceFileContent,
+                            enabled:
+                                typeof params.disableWorkspaceFile === "boolean"
+                                    ? !params.disableWorkspaceFile
+                                    : true,
+                        }
+                    );
+                    summary.push(
+                        result.disabled
+                            ? `已禁用 ${result.file.filename}`
+                            : result.file.customized
+                                ? `已更新 ${result.file.filename}`
+                                : `已恢复默认 ${result.file.filename}`
+                    );
+                }
+
+                if (
+                    Object.prototype.hasOwnProperty.call(
+                        params,
+                        "transitionPhrasesText"
+                    )
+                ) {
+                    const result = await this.updateTransitionPhrases(
+                        params.transitionPhrasesText
+                    );
+                    summary.push(
+                        result.customized
+                            ? `已更新 ${result.phrases.length} 条过渡播报词`
+                            : "已恢复默认过渡播报词"
+                    );
+                }
+
+                if (!summary.length) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text:
+                                "[SYSTEM]没有收到可修改的高级设置。可用字段包括 channel、target、disableNotification、model、audioTailPaddingMs、thinkingEnabled、forceNonStreamingEnabled、dialogWindowSeconds、debugLogEnabled、voiceContextTurns、voiceContextChars、voiceSystemPrompt、workspaceFile、workspaceFileContent、disableWorkspaceFile、transitionPhrasesText。",
+                        }],
+                    };
+                }
+
+                const detail = summary.map((item) => `- ${item}`).join("\n");
+                this.recordConsoleEvent(
+                    "tool.settings",
+                    "批量修改高级设置",
+                    summary.join("；"),
+                    "success"
+                );
+                return {
+                    content: [{
+                        type: "text",
+                        text:
+                            "[SYSTEM]已更新以下设置：\n" +
+                            detail +
+                            (gatewayRestarting
+                                ? "\nOpenClaw 网关正在自动重启，稍后会恢复。"
+                                : ""),
                     }],
                 };
             },

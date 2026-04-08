@@ -58,6 +58,16 @@ export interface VerificationTicketSubmission {
     ticket: string;
 }
 
+export interface VerificationCodeRequestSubmission {
+    preferredMethod?: "phone" | "email";
+}
+
+export interface VerificationPageOpenPayload {
+    message: string;
+    openUrl: string;
+    verification?: LoginVerificationChallenge;
+}
+
 export interface LoginPortalSessionSnapshot {
     id: string;
     status: "pending" | "processing" | "success" | "error";
@@ -231,14 +241,19 @@ function contentTypeForAsset(assetPath: string) {
 }
 
 function portalAssetBaseUrl(primaryUrl: string) {
-    const assetUrl = new URL(primaryUrl);
+    const assetUrl = new URL(primaryUrl, "http://localhost");
     const trimmedPath =
         assetUrl.pathname.replace(/\/auth\/[a-f0-9]+\/?$/i, "") || "/";
-    assetUrl.pathname =
-        trimmedPath === "/" ? "/assets" : `${trimmedPath.replace(/\/+$/, "")}/assets`;
-    assetUrl.search = "";
-    assetUrl.hash = "";
-    return assetUrl.toString().replace(/\/+$/, "");
+    return (
+        trimmedPath === "/" ? "/assets" : `${trimmedPath.replace(/\/+$/, "")}/assets`
+    ).replace(/\/+$/, "");
+}
+
+function portalRequestBaseUrl(primaryUrl: string) {
+    const requestUrl = new URL(primaryUrl, "http://localhost");
+    requestUrl.search = "";
+    requestUrl.hash = "";
+    return requestUrl.pathname.replace(/\/+$/, "");
 }
 
 function sessionMetaPills(seed: Omit<LoginSessionSeed, "tokenStorePath">) {
@@ -338,10 +353,18 @@ function renderLoginPage(
     session: PublicLoginPortalSessionSnapshot,
     options?: {
         embedded?: boolean;
+        requestUrl?: string;
     }
 ) {
     const seed = session.seed;
-    const assetBasePath = portalAssetBaseUrl(session.primaryUrl);
+    const requestBaseUrl = (() => {
+        try {
+            return portalRequestBaseUrl(options?.requestUrl || session.primaryUrl);
+        } catch {
+            return portalRequestBaseUrl(session.primaryUrl);
+        }
+    })();
+    const assetBasePath = portalAssetBaseUrl(requestBaseUrl);
     const assetVersion = uiAssetVersionQuery();
     const embedded = Boolean(options?.embedded);
     const initialStatus =
@@ -423,7 +446,8 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
             >
           </label>
 
-          <div class="portal-simple-actions portal-simple-actions-single">
+          <div class="portal-simple-actions">
+            <button class="soft-btn" type="button" id="openVerifyBtn" hidden>打开验证页面</button>
             <button class="primary-btn" type="submit" id="submitLoginBtn">登录</button>
           </div>
         </form>
@@ -433,11 +457,13 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
   <script type="module" src="${htmlEscape(assetBasePath)}/ui/xiaoai-console.js${assetVersion}"></script>
   <script>
     const embeddedMode = ${embedded ? "true" : "false"};
-    const statusUrl = ${JSON.stringify(`${session.primaryUrl}/status`)};
-    const passwordLoginUrl = ${JSON.stringify(`${session.primaryUrl}/login/password`)};
-    const verifyTicketUrl = ${JSON.stringify(`${session.primaryUrl}/verify/ticket`)};
+    const statusUrl = ${JSON.stringify(`${requestBaseUrl}/status`)};
+    const passwordLoginUrl = ${JSON.stringify(`${requestBaseUrl}/login/password`)};
+    const verifyTicketUrl = ${JSON.stringify(`${requestBaseUrl}/verify/ticket`)};
+    const openVerifyPageApiUrl = ${JSON.stringify(`${requestBaseUrl}/verify/page`)};
     const statusBox = document.getElementById("statusBox");
     const authForm = document.getElementById("authForm");
+    const openVerifyBtn = document.getElementById("openVerifyBtn");
     const submitLoginBtn = document.getElementById("submitLoginBtn");
     const ticketFieldShell = document.getElementById("ticketFieldShell");
     const accountInput = authForm.elements.namedItem("account");
@@ -447,8 +473,8 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
 
     let verification = ${JSON.stringify(session.verification || null)};
     let verificationKey = "";
-    let verifyPageOpened = false;
     let loginInFlight = false;
+    let openVerifyPageInFlight = false;
     let verifyInFlight = false;
     let sessionCompleted = ${session.status === "success" ? "true" : "false"};
 
@@ -503,9 +529,6 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
       }
       if (verification) {
         const method = verificationMethodLabel(verification.methods);
-        if (!verifyPageOpened) {
-          return method ? "需要" + method : "需要安全验证";
-        }
         return method ? "请输入" + method : "请输入验证码";
       }
       if (kind === "err") {
@@ -530,16 +553,6 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
           }, window.location.origin);
         } catch (_) {}
       }
-    }
-
-    function currentActionLabel() {
-      if (sessionCompleted) {
-        return "已完成";
-      }
-      if (verification && !verifyPageOpened && verification.verifyUrl) {
-        return "打开验证页面";
-      }
-      return "登录";
     }
 
     function measureEmbeddedHeight() {
@@ -578,9 +591,15 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
     }
 
     function updateActionButtons() {
-      const busy = loginInFlight || verifyInFlight;
+      const busy = loginInFlight || openVerifyPageInFlight || verifyInFlight;
       submitLoginBtn.disabled = busy || sessionCompleted;
-      submitLoginBtn.textContent = currentActionLabel();
+      submitLoginBtn.textContent = sessionCompleted ? "已完成" : "登录";
+      if (openVerifyBtn) {
+        const canOpenVerify = Boolean(verification && verification.verifyUrl && !sessionCompleted);
+        openVerifyBtn.hidden = !canOpenVerify;
+        openVerifyBtn.disabled = busy || !canOpenVerify;
+        openVerifyBtn.textContent = "打开验证页面";
+      }
       queueEmbeddedLayoutReport();
     }
 
@@ -589,14 +608,12 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
       const nextKey = currentVerificationKey(verification);
       if (!verification) {
         verificationKey = "";
-        verifyPageOpened = false;
         ticketInput.value = "";
         if (ticketFieldShell) {
           ticketFieldShell.hidden = true;
         }
       } else if (nextKey !== verificationKey) {
         verificationKey = nextKey;
-        verifyPageOpened = false;
         if (ticketFieldShell) {
           ticketFieldShell.hidden = false;
         }
@@ -654,7 +671,7 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
     }
 
     async function loginByPassword() {
-      if (loginInFlight || verifyInFlight || sessionCompleted) {
+      if (loginInFlight || openVerifyPageInFlight || verifyInFlight || sessionCompleted) {
         return;
       }
       const account = String(accountInput.value || "").trim();
@@ -667,6 +684,7 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
         setStatus("err", "请先填写小米账号密码。");
         return;
       }
+      renderVerification(null);
       loginInFlight = true;
       updateActionButtons();
       setStatus("", "正在登录，请稍候…");
@@ -686,7 +704,7 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
     }
 
     async function verifyByTicket() {
-      if (verifyInFlight || loginInFlight || sessionCompleted) {
+      if (verifyInFlight || loginInFlight || openVerifyPageInFlight || sessionCompleted) {
         return;
       }
       const ticket = String(ticketInput.value || "").trim();
@@ -708,26 +726,42 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
       }
     }
 
-    function openVerifyPage() {
-      if (!verification || !verification.verifyUrl) {
-        setStatus("err", "当前没有可用的验证页面。");
+    async function openVerifyPage() {
+      if (!verification || !verification.verifyUrl || openVerifyPageInFlight || loginInFlight || verifyInFlight || sessionCompleted) {
         return;
       }
-      verifyPageOpened = true;
+      openVerifyPageInFlight = true;
       updateActionButtons();
-      setStatus("", "填写验证码后再登录");
-      window.open(verification.verifyUrl, "_blank", "noopener");
+      setStatus("", "正在打开官方验证页面，请稍候…");
+      try {
+        const data = await postJson(openVerifyPageApiUrl, {});
+        const openUrl = String(data && (data.openUrl || (data.verification && data.verification.verifyUrl) || "") || "").trim();
+        if (!openUrl) {
+          throw new Error("当前没有可用的官方验证页面。");
+        }
+        const openedWindow = window.open(openUrl, "_blank", "noopener");
+        if (!openedWindow) {
+          throw new Error("浏览器拦截了验证页面，请允许弹窗后重试。");
+        }
+        setStatus("", "请在官方页面获取验证码，回到这里填写后再点登录。");
+      } catch (error) {
+        setStatus("err", error.message || String(error));
+      } finally {
+        openVerifyPageInFlight = false;
+        updateActionButtons();
+      }
     }
 
     authForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (verification) {
-        if (!verifyPageOpened && verification.verifyUrl) {
-          openVerifyPage();
-          return;
-        }
         if (!String(ticketInput.value || "").trim()) {
-          setStatus("err", "请先填入验证码，再点登录。");
+          setStatus(
+            "err",
+            verification.verifyUrl
+              ? "请先点上面的打开验证页面，获取验证码并填写后再点登录。"
+              : "请先填入验证码，再点登录。"
+          );
           return;
         }
         await verifyByTicket();
@@ -735,6 +769,10 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
       }
       await loginByPassword();
     });
+
+    if (openVerifyBtn) {
+      openVerifyBtn.addEventListener("click", openVerifyPage);
+    }
 
     renderVerification(verification);
     updateActionButtons();
@@ -779,6 +817,10 @@ export class LoginPortal {
             sessionId: string,
             payload: VerificationTicketSubmission
         ) => Promise<LoginDiscoveryPayload | LoginSuccessPayload | LoginVerificationPayload>;
+        onPrepareVerificationPage: (
+            sessionId: string,
+            payload: VerificationCodeRequestSubmission
+        ) => Promise<VerificationPageOpenPayload>;
         onTrace?: (event: string, details: Record<string, any>) => void | Promise<void>;
     }) {}
 
@@ -1063,6 +1105,14 @@ export class LoginPortal {
                 ticketLength: ticket.length || undefined,
             };
         }
+        if (action === "verify/page") {
+            return {
+                preferredMethod:
+                    body?.preferredMethod === "phone" || body?.preferredMethod === "email"
+                        ? body.preferredMethod
+                        : undefined,
+            };
+        }
         return common;
     }
 
@@ -1134,7 +1184,7 @@ export class LoginPortal {
         }
 
         const matches = matchedPath.match(
-            /^\/auth\/([a-f0-9]+)(?:\/(status|discover\/password|verify\/ticket|login\/password))?$/
+            /^\/auth\/([a-f0-9]+)(?:\/(status|discover\/password|verify\/ticket|verify\/page|login\/password))?$/
         );
         if (!matches) {
             notFound(response);
@@ -1182,6 +1232,7 @@ export class LoginPortal {
                     response,
                     renderLoginPage(this.toPublicSnapshot(session), {
                         embedded: requestUrl.searchParams.get("embedded") === "1",
+                        requestUrl: requestUrl.toString(),
                     })
                 );
             }
@@ -1291,6 +1342,56 @@ export class LoginPortal {
                     verificationRequired: Boolean(session.verification),
                 });
                 sendJson(response, 200, this.toPublicSnapshot(session));
+            } catch (error) {
+                session.status = "error";
+                session.activeAction = undefined;
+                session.error = error instanceof Error ? error.message : String(error);
+                this.touchSession(session);
+                await this.trace("portal_action_error", {
+                    ...this.requestMeta(request, matchedPath, session.id, action),
+                    error: session.error,
+                });
+                sendJson(response, 400, { error: session.error });
+            }
+            return;
+        }
+
+        if (request.method === "POST" && action === "verify/page") {
+            if (this.tryRespondWithExistingActionState(response, session, action)) {
+                return;
+            }
+            const body = await readJsonBody(request);
+            this.touchSession(session);
+            session.status = "processing";
+            session.activeAction = action;
+            session.message = "正在准备官方验证页面…";
+            session.error = undefined;
+            await this.trace("portal_action_start", {
+                ...this.requestMeta(request, matchedPath, session.id, action),
+                payload: this.summarizeActionBody(action, body),
+            });
+            try {
+                const result = await this.options.onPrepareVerificationPage(session.id, {
+                    preferredMethod:
+                        body?.preferredMethod === "phone" || body?.preferredMethod === "email"
+                            ? body.preferredMethod
+                            : undefined,
+                });
+                session.verification = result.verification || session.verification;
+                session.status = "pending";
+                session.message = result.message;
+                this.touchSession(session);
+                session.activeAction = undefined;
+                await this.trace("portal_action_success", {
+                    ...this.requestMeta(request, matchedPath, session.id, action),
+                    status: session.status,
+                    message: session.message,
+                    verificationRequired: Boolean(session.verification),
+                });
+                sendJson(response, 200, {
+                    ...this.toPublicSnapshot(session),
+                    openUrl: result.openUrl,
+                });
             } catch (error) {
                 session.status = "error";
                 session.activeAction = undefined;

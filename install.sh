@@ -16,6 +16,7 @@ CURRENT_STAGE="bootstrap"
 LOG_PIPE=""
 TEE_PID=""
 LOG_STDIO_REDIRECTED=0
+INITIAL_GATEWAY_PID=""
 
 print_help() {
   cat <<'EOF'
@@ -406,6 +407,76 @@ inspect_installed_plugin_json() {
   run_openclaw plugins inspect openclaw-plugin-xiaoai-cloud --json
 }
 
+resolve_gateway_runtime_pid() {
+  run_openclaw gateway status 2>/dev/null |
+    sed -n 's/.*Runtime: running (pid \([0-9][0-9]*\),.*/\1/p' |
+    head -n 1
+}
+
+probe_gateway_health() {
+  run_openclaw gateway health >/dev/null 2>&1
+}
+
+wait_for_gateway_health() {
+  timeout_seconds="${1:-60}"
+  interval_seconds=2
+  elapsed=0
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    if probe_gateway_health; then
+      return 0
+    fi
+    sleep "$interval_seconds"
+    elapsed=$((elapsed + interval_seconds))
+  done
+
+  return 1
+}
+
+wait_for_gateway_reload() {
+  previous_pid="$1"
+  timeout_seconds="${2:-75}"
+  interval_seconds=2
+  elapsed=0
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    current_pid=$(resolve_gateway_runtime_pid || true)
+    if [ -n "$current_pid" ] && [ "$current_pid" != "$previous_pid" ]; then
+      if wait_for_gateway_health 20; then
+        printf '%s\n' "$current_pid"
+        return 0
+      fi
+    fi
+    sleep "$interval_seconds"
+    elapsed=$((elapsed + interval_seconds))
+  done
+
+  return 1
+}
+
+ensure_gateway_running_after_install() {
+  if [ -n "$INITIAL_GATEWAY_PID" ]; then
+    info "[gateway] Waiting for OpenClaw automatic reload..."
+    next_pid=$(wait_for_gateway_reload "$INITIAL_GATEWAY_PID" 75 || true)
+    if [ -n "$next_pid" ]; then
+      info "[gateway] Automatic reload detected: pid $INITIAL_GATEWAY_PID -> $next_pid"
+      return 0
+    fi
+    warn "[gateway] Automatic reload was not detected in time; falling back to explicit restart."
+  else
+    info "[gateway] No running gateway detected before install."
+  fi
+
+  run_openclaw gateway restart
+  if wait_for_gateway_health 120; then
+    info "[gateway] Gateway health check passed after fallback restart."
+    return 0
+  fi
+
+  error "[gateway] Gateway did not become healthy after fallback restart."
+  return 1
+}
+
 resolve_openclaw_config_file() {
   config_file=$(run_openclaw config file 2>/dev/null | extract_last_nonempty_line || true)
   if [ -n "$config_file" ]; then
@@ -622,6 +693,11 @@ else
   info "[2/6] Using prebuilt release bundle, skipping build..."
 fi
 
+INITIAL_GATEWAY_PID=$(resolve_gateway_runtime_pid || true)
+if [ -n "$INITIAL_GATEWAY_PID" ]; then
+  info "[gateway] Detected running gateway pid before install: $INITIAL_GATEWAY_PID"
+fi
+
 set_stage "install_plugin"
 info "[3/6] Installing plugin into OpenClaw..."
 remove_existing_plugin_install
@@ -657,9 +733,9 @@ XIAOAI_INSTALL_LOG_CAPTURED=1 XIAOAI_INSTALL_LOG_FILE="$LOG_FILE" \
   node "$SOURCE_DIR/scripts/configure-openclaw-install.mjs" "$@"
 
 set_stage "inspect_and_restart"
-info "[6/6] Inspecting plugin and restarting gateway..."
+info "[6/6] Inspecting plugin and ensuring gateway is ready..."
 inspect_installed_plugin_json
-run_openclaw gateway restart
+ensure_gateway_running_after_install
 
 set_stage "completed"
 echo

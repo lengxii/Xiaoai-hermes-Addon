@@ -10,6 +10,9 @@ export interface PersistedCloudProfile {
     miDid?: string;
     minaDeviceId?: string;
     tokenStorePath?: string;
+    openclawChannel?: string;
+    openclawTo?: string;
+    openclawNotificationsDisabled?: boolean;
     wakeWordPattern?: string;
     dialogWindowSeconds?: number;
     openclawThinkingOff?: boolean;
@@ -19,7 +22,31 @@ export interface PersistedCloudProfile {
     debugLogEnabled?: boolean;
     voiceContextMaxTurns?: number;
     voiceContextMaxChars?: number;
+    audioTailPaddingMs?: number;
+    speakerAudioLatencyProfiles?: Record<string, PersistedSpeakerAudioLatencyProfile>;
+    lastAudioCalibration?: PersistedAudioCalibrationSummary;
     updatedAt?: string;
+}
+
+export interface PersistedSpeakerAudioLatencyProfile {
+    statusProbeEstimateMs?: number;
+    pauseSettleEstimateMs?: number;
+    stopSettleEstimateMs?: number;
+    playbackDetectEstimateMs?: number;
+    updatedAtMs?: number;
+}
+
+export interface PersistedAudioCalibrationSummary {
+    deviceId?: string;
+    deviceName?: string;
+    rounds?: number;
+    successCount?: number;
+    failureCount?: number;
+    tailPaddingMs?: number;
+    startedAt?: string;
+    completedAt?: string;
+    lastError?: string;
+    latencyProfile?: PersistedSpeakerAudioLatencyProfile;
 }
 
 export interface ConsoleEventEntry {

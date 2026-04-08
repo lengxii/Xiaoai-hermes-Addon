@@ -36,6 +36,7 @@ const REQUIRED_XIAOAI_TOOLS = [
     "xiaoai_login_status",
     "xiaoai_console_open",
     "xiaoai_set_dialog_window",
+    "xiaoai_update_settings",
 ];
 const WORKSPACE_PROMPT_FILENAME = "AGENTS.md";
 const DEFAULT_XIAOAI_AGENT_SYSTEM_PROMPT = [
@@ -52,8 +53,11 @@ const LIGHTWEIGHT_WORKSPACE_FILES = {
     "IDENTITY.md": "身份：小爱语音代理。\n",
     "TOOLS.md": "只使用 xiaoai_* 工具处理音箱相关任务。\n",
     "HEARTBEAT.md": "无需执行心跳任务。\n",
-    "BOOT.md": "无需启动动作。\n",
     "MEMORY.md": "仅保留少量长期偏好。\n",
+};
+const OBSOLETE_LIGHTWEIGHT_WORKSPACE_FILES = {
+    "BOOT.md": ["无需启动动作。\n", "无需启动动作。"],
+    "BOOTSTRAP.md": [],
 };
 const LEGACY_LIGHTWEIGHT_WORKSPACE_FILES = {
     [WORKSPACE_PROMPT_FILENAME]: [
@@ -84,6 +88,17 @@ const LEGACY_LIGHTWEIGHT_WORKSPACE_FILES = {
         ].join("\n"),
     ],
 };
+const PLUGIN_MANAGED_WORKSPACE_FILENAMES = [
+    WORKSPACE_PROMPT_FILENAME,
+    "SOUL.md",
+    "USER.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+    "BOOT.md",
+    "BOOTSTRAP.md",
+    "MEMORY.md",
+];
 
 function printHelp() {
     console.log(`Usage: node scripts/configure-openclaw-install.mjs [options]
@@ -561,35 +576,114 @@ function readStringList(value) {
         .filter(Boolean);
 }
 
+function readBoolean(value) {
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (typeof value === "number") {
+        if (value === 1) {
+            return true;
+        }
+        if (value === 0) {
+            return false;
+        }
+        return undefined;
+    }
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (!normalized) {
+            return undefined;
+        }
+        if (["1", "true", "yes", "on"].includes(normalized)) {
+            return true;
+        }
+        if (["0", "false", "no", "off"].includes(normalized)) {
+            return false;
+        }
+    }
+    return undefined;
+}
+
+function collectConfiguredOpenclawChannels(config) {
+    const channels = isRecord(config?.channels) ? config.channels : {};
+    const configured = [];
+    for (const [channelId, channelConfig] of Object.entries(channels)) {
+        const normalizedChannelId = readString(channelId).toLowerCase();
+        if (!normalizedChannelId || !isRecord(channelConfig)) {
+            continue;
+        }
+        if (readBoolean(channelConfig.enabled) === false) {
+            continue;
+        }
+        configured.push(normalizedChannelId);
+    }
+    return uniqueStrings(configured);
+}
+
+function inferOpenclawNotificationChannel(config, preferredChannel = "") {
+    const normalizedPreferred = readString(preferredChannel).toLowerCase();
+    if (normalizedPreferred) {
+        return normalizedPreferred;
+    }
+    const configuredChannels = collectConfiguredOpenclawChannels(config);
+    return configuredChannels.length === 1 ? configuredChannels[0] : "";
+}
+
+function collectOpenclawNotificationTargetsFromNode(value, candidates, depth = 0) {
+    if (!isRecord(value)) {
+        return;
+    }
+
+    for (const item of [
+        ...readStringList(value.allowFrom),
+        ...readStringList(value.allowUsers),
+        ...readStringList(value.allowTargets),
+        ...readStringList(value.targets),
+    ]) {
+        candidates.add(item);
+    }
+
+    for (const item of [
+        readString(value.target),
+        readString(value.to),
+        readString(value.chatId),
+        readString(value.userId),
+        readString(value.channelId),
+        readString(value.roomId),
+        readString(value.threadId),
+        readString(value.recipient),
+        readString(value.conversationId),
+        readString(value.peerId),
+    ].filter(Boolean)) {
+        candidates.add(item);
+    }
+
+    if (depth >= 2) {
+        return;
+    }
+
+    for (const nested of Object.values(value)) {
+        if (isRecord(nested)) {
+            collectOpenclawNotificationTargetsFromNode(nested, candidates, depth + 1);
+        }
+    }
+}
+
 function collectOpenclawNotificationTargets(config, channel) {
-    const normalizedChannel = readString(channel).toLowerCase() || "telegram";
-    if (normalizedChannel !== "telegram") {
+    const normalizedChannel = inferOpenclawNotificationChannel(config, channel);
+    if (!normalizedChannel) {
         return [];
     }
-    const telegramConfig =
-        isRecord(config?.channels) && isRecord(config.channels.telegram)
-            ? config.channels.telegram
-            : null;
-    if (!telegramConfig) {
+    const channelsConfig = isRecord(config?.channels) ? config.channels : {};
+    const channelConfig = isRecord(channelsConfig[normalizedChannel])
+        ? channelsConfig[normalizedChannel]
+        : null;
+    if (!channelConfig) {
         return [];
     }
 
-    const targets = new Set(readStringList(telegramConfig.allowFrom));
-    const accounts = isRecord(telegramConfig.accounts) ? telegramConfig.accounts : {};
-    for (const account of Object.values(accounts)) {
-        if (!isRecord(account)) {
-            continue;
-        }
-        for (const value of [
-            ...readStringList(account.allowFrom),
-            readString(account.target),
-            readString(account.to),
-            readString(account.chatId),
-            readString(account.userId),
-        ].filter(Boolean)) {
-            targets.add(value);
-        }
-    }
+    const targets = new Set();
+    collectOpenclawNotificationTargetsFromNode(channelConfig, targets);
     return Array.from(targets);
 }
 
@@ -657,29 +751,122 @@ function deriveDedicatedWorkspace(mainWorkspace, agentId, existingWorkspace) {
         : path.join(dirName, `${baseName}${suffix}`);
 }
 
-function ensureWorkspaceScaffold(workspacePath) {
+function normalizeWorkspaceFileContent(value) {
+    return typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
+}
+
+function loadOpenclawOfficialWorkspaceTemplates(packageDir) {
+    const templates = {};
+    const trimmedPackageDir = typeof packageDir === "string" ? packageDir.trim() : "";
+    if (!trimmedPackageDir) {
+        return templates;
+    }
+
+    const templateDir = path.join(trimmedPackageDir, "docs", "reference", "templates");
+    if (!fs.existsSync(templateDir)) {
+        logWarn(
+            `[install] OpenClaw template directory not found, skipping template migration: ${templateDir}`
+        );
+        return templates;
+    }
+
+    for (const name of PLUGIN_MANAGED_WORKSPACE_FILENAMES) {
+        const filePath = path.join(templateDir, name);
+        if (!fs.existsSync(filePath)) {
+            continue;
+        }
+        try {
+            templates[name] = fs.readFileSync(filePath, "utf8");
+        } catch (error) {
+            logWarn(
+                `[install] Failed to read OpenClaw template ${filePath}: ${
+                    error instanceof Error ? error.message : String(error)
+                }`
+            );
+        }
+    }
+
+    return templates;
+}
+
+function buildWorkspaceReplacementCandidates(name, content, officialTemplates) {
+    const candidates = [];
+    if (typeof content === "string") {
+        candidates.push(content);
+    }
+
+    const legacyContent = LEGACY_LIGHTWEIGHT_WORKSPACE_FILES[name];
+    if (Array.isArray(legacyContent)) {
+        candidates.push(...legacyContent);
+    } else if (typeof legacyContent === "string") {
+        candidates.push(legacyContent);
+    }
+
+    const obsoleteContent = OBSOLETE_LIGHTWEIGHT_WORKSPACE_FILES[name];
+    if (Array.isArray(obsoleteContent)) {
+        candidates.push(...obsoleteContent);
+    } else if (typeof obsoleteContent === "string") {
+        candidates.push(obsoleteContent);
+    }
+
+    if (typeof officialTemplates[name] === "string") {
+        candidates.push(officialTemplates[name]);
+    }
+
+    return uniqueStrings(
+        candidates
+            .map((item) => normalizeWorkspaceFileContent(item))
+            .filter(Boolean)
+    );
+}
+
+function shouldReplaceManagedWorkspaceFile(existingContent, replaceCandidates) {
+    const normalizedExisting = normalizeWorkspaceFileContent(existingContent);
+    if (!normalizedExisting) {
+        return true;
+    }
+    return replaceCandidates.includes(normalizedExisting);
+}
+
+function ensureWorkspaceScaffold(workspacePath, options = {}) {
+    const officialTemplates = loadOpenclawOfficialWorkspaceTemplates(options.openclawPackageDir);
     fs.mkdirSync(workspacePath, { recursive: true });
+    for (const [name, legacyContents] of Object.entries(OBSOLETE_LIGHTWEIGHT_WORKSPACE_FILES)) {
+        const filePath = path.join(workspacePath, name);
+        if (!fs.existsSync(filePath)) {
+            continue;
+        }
+        const existing = fs.readFileSync(filePath, "utf8");
+        const removeCandidates = buildWorkspaceReplacementCandidates(
+            name,
+            "",
+            officialTemplates
+        );
+        if (
+            legacyContents.some((candidate) => existing === candidate) ||
+            shouldReplaceManagedWorkspaceFile(existing, removeCandidates)
+        ) {
+            fs.rmSync(filePath, { force: true });
+            logInfo(`[install] Removed plugin-disabled workspace template: ${filePath}`);
+        }
+    }
     for (const [name, content] of Object.entries(LIGHTWEIGHT_WORKSPACE_FILES)) {
         const filePath = path.join(workspacePath, name);
         if (fs.existsSync(filePath)) {
-            const legacyContent = LEGACY_LIGHTWEIGHT_WORKSPACE_FILES[name];
-            if (legacyContent) {
-                const existing = fs.readFileSync(filePath, "utf8");
-                const legacyCandidates = Array.isArray(legacyContent)
-                    ? legacyContent
-                    : [legacyContent];
-                if (
-                    legacyCandidates.some(
-                        (candidate) =>
-                            existing === candidate || existing === `${candidate}\n`
-                    )
-                ) {
-                    fs.writeFileSync(filePath, content, "utf8");
-                }
+            const existing = fs.readFileSync(filePath, "utf8");
+            const replaceCandidates = buildWorkspaceReplacementCandidates(
+                name,
+                content,
+                officialTemplates
+            );
+            if (shouldReplaceManagedWorkspaceFile(existing, replaceCandidates)) {
+                fs.writeFileSync(filePath, content, "utf8");
+                logInfo(`[install] Updated managed workspace template: ${filePath}`);
             }
             continue;
         }
         fs.writeFileSync(filePath, content, "utf8");
+        logInfo(`[install] Created managed workspace template: ${filePath}`);
     }
 }
 
@@ -820,6 +1007,93 @@ function ensureAgent(runOpenclaw, agentId, workspacePath, modelId) {
     return { created: true, agents };
 }
 
+function derivePrimaryWorkspace(mainWorkspace) {
+    const trimmedMain =
+        typeof mainWorkspace === "string" ? mainWorkspace.trim() : "";
+    return trimmedMain || path.join(os.homedir(), ".openclaw", "workspace");
+}
+
+function buildPrimaryAgentConfig(
+    configMainAgent,
+    listedMainAgent,
+    agentsConfig,
+    desiredModel
+) {
+    const workspace = derivePrimaryWorkspace(
+        typeof configMainAgent?.workspace === "string"
+            ? configMainAgent.workspace
+            : typeof listedMainAgent?.workspace === "string"
+                ? listedMainAgent.workspace
+                : typeof agentsConfig.defaults?.workspace === "string"
+                    ? agentsConfig.defaults.workspace
+                    : ""
+    );
+    const model =
+        typeof configMainAgent?.model === "string" && configMainAgent.model.trim()
+            ? configMainAgent.model.trim()
+            : typeof listedMainAgent?.model === "string" && listedMainAgent.model.trim()
+                ? listedMainAgent.model.trim()
+                : desiredModel;
+
+    const nextAgent = isRecord(configMainAgent) ? { ...configMainAgent } : {};
+    nextAgent.id = "main";
+    nextAgent.workspace = workspace;
+    if (model) {
+        nextAgent.model = model;
+    }
+    delete nextAgent.systemPrompt;
+    return nextAgent;
+}
+
+function ensureDedicatedAgentDoesNotBecomeDefault(
+    agentList,
+    desiredAgentId,
+    primaryAgentTemplate
+) {
+    const nextAgentList = Array.isArray(agentList) ? agentList : [];
+    const targetIndex = findAgentIndex(nextAgentList, desiredAgentId);
+    if (targetIndex >= 0 && isRecord(nextAgentList[targetIndex])) {
+        nextAgentList[targetIndex] = {
+            ...nextAgentList[targetIndex],
+            default: false,
+        };
+    }
+
+    const existingDefaultIndex = nextAgentList.findIndex(
+        (agent) => isRecord(agent) && agent.id !== desiredAgentId && agent.default === true
+    );
+    if (existingDefaultIndex >= 0) {
+        return nextAgentList;
+    }
+
+    const primaryAgentIndex = findAgentIndex(nextAgentList, "main");
+    if (primaryAgentIndex >= 0 && isRecord(nextAgentList[primaryAgentIndex])) {
+        nextAgentList[primaryAgentIndex] = {
+            ...nextAgentList[primaryAgentIndex],
+            default: true,
+        };
+        return nextAgentList;
+    }
+
+    const fallbackIndex = nextAgentList.findIndex(
+        (agent) => isRecord(agent) && agent.id !== desiredAgentId
+    );
+    if (fallbackIndex >= 0 && isRecord(nextAgentList[fallbackIndex])) {
+        nextAgentList[fallbackIndex] = {
+            ...nextAgentList[fallbackIndex],
+            default: true,
+        };
+        return nextAgentList;
+    }
+
+    nextAgentList.unshift({
+        ...primaryAgentTemplate,
+        id: "main",
+        default: true,
+    });
+    return nextAgentList;
+}
+
 function configureOpenclaw(options) {
     configureLogging(options);
     logInfo(
@@ -879,7 +1153,9 @@ function configureOpenclaw(options) {
                 ? listedTargetAgent.workspace
                 : ""
     );
-    ensureWorkspaceScaffold(desiredWorkspace);
+    ensureWorkspaceScaffold(desiredWorkspace, {
+        openclawPackageDir: hostRuntime.packageDir,
+    });
     logInfo(`[install] Dedicated workspace: ${desiredWorkspace}`);
 
     const { created } = ensureAgent(
@@ -908,10 +1184,24 @@ function configureOpenclaw(options) {
     const nextPluginConfig = isRecord(previousEntry.config)
         ? { ...previousEntry.config }
         : {};
-    const resolvedOpenclawChannel = readString(nextPluginConfig.openclawChannel || mergedConfig.openclawChannel) || "telegram";
+    const inferredOpenclawChannel = inferOpenclawNotificationChannel(config);
+    const resolvedOpenclawChannel =
+        readString(nextPluginConfig.openclawChannel || mergedConfig.openclawChannel) ||
+        inferredOpenclawChannel ||
+        "telegram";
     const inferredOpenclawTo =
         readString(nextPluginConfig.openclawTo || mergedConfig.openclawTo) ||
         inferOpenclawNotificationTarget(config, resolvedOpenclawChannel);
+    if (
+        !readString(nextPluginConfig.openclawChannel || mergedConfig.openclawChannel) &&
+        !inferredOpenclawChannel
+    ) {
+        logWarn(
+            `[install] Unable to uniquely infer the OpenClaw notification channel. ` +
+                `Falling back to "${resolvedOpenclawChannel}". ` +
+                "If your active channel is not telegram, confirm openclawChannel/openclawTo in the control UI."
+        );
+    }
 
     Object.assign(nextPluginConfig, mergedConfig);
     if (!nextPluginConfig.openclawAgent || nextPluginConfig.openclawAgent === "main") {
@@ -964,6 +1254,16 @@ function configureOpenclaw(options) {
     } else {
         nextAgentList.push(previousAgent);
     }
+    ensureDedicatedAgentDoesNotBecomeDefault(
+        nextAgentList,
+        desiredAgentId,
+        buildPrimaryAgentConfig(
+            configMainAgent,
+            listedMainAgent,
+            agentsConfig,
+            desiredModel
+        )
+    );
 
     const allow = Array.isArray(nextPlugins.allow)
         ? nextPlugins.allow.filter((item) => typeof item === "string" && item.trim().length > 0)

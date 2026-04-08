@@ -596,6 +596,36 @@ function findVerificationUrlInText(text: string): string | undefined {
     return undefined;
 }
 
+function findVerificationPageUrlInText(text: string): string | undefined {
+    const absoluteMatch = text.match(
+        /https?:\/\/account\.xiaomi\.com\/fe\/service\/identity\/(?:verifyPhone|verifyEmail|authStart)[^\s"'<>)]*/i
+    );
+    if (absoluteMatch?.[0]) {
+        return resolveAccountUrl(absoluteMatch[0]);
+    }
+    const relativeMatch = text.match(
+        /\/fe\/service\/identity\/(?:verifyPhone|verifyEmail|authStart)[^\s"'<>)]*/i
+    );
+    if (relativeMatch?.[0]) {
+        return resolveAccountUrl(relativeMatch[0]);
+    }
+    return undefined;
+}
+
+function deriveVerificationPageUrl(
+    verifyUrl: string,
+    method: XiaomiVerificationMethod
+): string {
+    const targetUrl = new URL(verifyUrl, ACCOUNT_ORIGIN);
+    if (targetUrl.pathname.includes("/fe/service/identity/authStart")) {
+        targetUrl.pathname = targetUrl.pathname.replace(
+            "/fe/service/identity/authStart",
+            `/fe/service/identity/${method === "phone" ? "verifyPhone" : "verifyEmail"}`
+        );
+    }
+    return targetUrl.toString();
+}
+
 function extractSetCookieLines(headers: Headers): string[] {
     const extendedHeaders = headers as Headers & {
         getSetCookie?: () => string[];
@@ -1901,10 +1931,8 @@ export class XiaomiAccountClient {
                     state,
                     message: [
                         `小米账号登录需要先完成一次${methods.includes("phone") ? "短信" : methods.includes("email") ? "邮箱" : ""}安全验证。`,
-                        "请先打开下面这个验证页面发送短信或邮箱验证码，不要在小米页面里完成最终验证。",
-                        "收到验证码后，回到当前登录页下方的“二次验证”区域提交即可。",
-                        "如果最后跳到 api2.mina.mi.com/sts 或显示 401，可以直接关闭那个页面。",
-                        verifyUrl,
+                        "请先点登录页上的“打开验证页面”按钮，在官方页面获取验证码。",
+                        "回到当前登录页填写验证码后，再点“登录”继续。",
                     ]
                         .filter(Boolean)
                         .join("\n"),
@@ -2211,6 +2239,231 @@ export class XiaomiAccountClient {
         });
     }
 
+    async prepareVerificationPage(preferredMethod?: XiaomiVerificationMethod) {
+        const verifyUrl = this.verificationUrl;
+        if (!verifyUrl) {
+            throw new Error("当前没有可继续的二次验证会话，请重新发起一次登录。");
+        }
+
+        const details =
+            this.verificationMethods.length > 0 || this.identitySession
+                ? {
+                      methods: [...this.verificationMethods],
+                      identitySession:
+                          this.identitySession ||
+                          this.accountCookies.identity_session,
+                  }
+                : await this.getVerificationDetails(verifyUrl);
+        const methods: XiaomiVerificationMethod[] =
+            details.methods.length > 0 ? details.methods : ["phone", "email"];
+        const chosenMethod: XiaomiVerificationMethod =
+            (preferredMethod && methods.includes(preferredMethod)
+                ? preferredMethod
+                : methods[0]) || "phone";
+        const identitySession =
+            details.identitySession || this.accountCookies.identity_session;
+
+        if (!identitySession) {
+            throw new Error(
+                "当前二次验证会话没有拿到 identity_session，请重新登录后再试。"
+            );
+        }
+
+        this.identitySession = identitySession;
+        let openUrl = deriveVerificationPageUrl(verifyUrl, chosenMethod);
+        try {
+            const { response, text } = await this.accountRequestRaw(openUrl, {
+                method: "GET",
+                cookies: {
+                    identity_session: identitySession,
+                },
+            });
+            const responseUrl = resolveAccountUrl(response.url);
+            openUrl =
+                findVerificationPageUrlInText(text) ||
+                (responseUrl &&
+                /\/fe\/service\/identity\/(?:verifyPhone|verifyEmail|authStart)/i.test(
+                    responseUrl
+                )
+                    ? responseUrl
+                    : undefined) ||
+                openUrl;
+        } catch {
+            // 如果预热失败，仍然退回到推导出的官方页面地址。
+        }
+
+        await this.trace("verification_page_prepared", {
+            verifyUrl,
+            openUrl,
+            chosenMethod,
+            methods,
+            identitySession,
+        });
+
+        return {
+            openUrl,
+            method: chosenMethod,
+            message:
+                chosenMethod === "phone"
+                    ? "官方短信验证页面已打开，请在那里获取验证码后回到这里填写。"
+                    : "官方邮箱验证页面已打开，请在那里获取验证码后回到这里填写。",
+        };
+    }
+
+    async requestVerificationCode(preferredMethod?: XiaomiVerificationMethod) {
+        const verifyUrl = this.verificationUrl;
+        if (!verifyUrl) {
+            throw new Error("当前没有待处理的二次验证会话，请重新点一次登录。");
+        }
+
+        const details =
+            this.verificationMethods.length > 0 || this.identitySession
+                ? {
+                      methods: [...this.verificationMethods],
+                      identitySession:
+                          this.identitySession ||
+                          this.accountCookies.identity_session,
+                  }
+                : await this.getVerificationDetails(verifyUrl);
+        const availableMethods = details.methods.length
+            ? [...details.methods]
+            : this.verificationMethods.length
+                ? [...this.verificationMethods]
+                : ["phone", "email"];
+        const identitySession =
+            details.identitySession || this.accountCookies.identity_session;
+
+        if (identitySession) {
+            this.identitySession = identitySession;
+        }
+        if (!identitySession) {
+            throw new Error(
+                "当前二次验证会话没有拿到 identity_session，请重新登录后再试。"
+            );
+        }
+
+        try {
+            await this.accountRequestRaw(verifyUrl, {
+                method: "GET",
+                cookies: {
+                    identity_session: identitySession,
+                },
+            });
+        } catch {
+            // 这里只做会话预热，不把预热失败当成最终失败。
+        }
+
+        const orderedMethods = [
+            ...(preferredMethod && availableMethods.includes(preferredMethod)
+                ? [preferredMethod]
+                : []),
+            ...availableMethods.filter((item) => item !== preferredMethod),
+        ];
+        const methodsToTry = Array.from(
+            new Set(
+                orderedMethods.length
+                    ? orderedMethods
+                    : ["phone", "email"]
+            )
+        );
+
+        let lastErrorMessage: string | undefined;
+        for (const method of methodsToTry) {
+            const requestAttempts =
+                method === "phone"
+                    ? [
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendPhoneTicket`,
+                              body: {},
+                          },
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendPhoneTicket`,
+                              body: { _json: "true" },
+                          },
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendPhoneTicket`,
+                              body: { trust: "true", _json: "true" },
+                          },
+                      ]
+                    : [
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendEmailTicket`,
+                              body: {},
+                          },
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendEmailTicket`,
+                              body: { _json: "true" },
+                          },
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendEmailTicket`,
+                              body: { _flag: 8, _json: "true" },
+                          },
+                          {
+                              url: `${ACCOUNT_ORIGIN}/identity/auth/sendEmailTicket`,
+                              body: { trust: "true", _flag: 8, _json: "true" },
+                          },
+                      ];
+
+            for (const attempt of requestAttempts) {
+                const payload = await this.accountRequestJson(attempt.url, {
+                    method: "POST",
+                    query: {
+                        _dc: Date.now(),
+                    },
+                    body: attempt.body,
+                    cookies: {
+                        identity_session: identitySession,
+                    },
+                });
+
+                if (
+                    payload?.code === 0 ||
+                    payload?.result === "ok" ||
+                    payload?.result === "success"
+                ) {
+                    await this.trace("verification_ticket_requested", {
+                        verifyUrl,
+                        method,
+                        payload,
+                    });
+                    return {
+                        method,
+                        message:
+                            method === "phone"
+                                ? "短信验证码已发送，请查看手机并回到这里填写。"
+                                : "邮箱验证码已发送，请查看邮箱并回到这里填写。",
+                    };
+                }
+
+                const reason =
+                    firstNonEmptyText(
+                        payload?.description,
+                        payload?.desc,
+                        payload?.message,
+                        payload?.msg,
+                        payload?.reason
+                    ) ||
+                    `code=${String(payload?.code ?? "unknown")}`;
+                lastErrorMessage = reason;
+                await this.trace("verification_ticket_request_failed", {
+                    verifyUrl,
+                    method,
+                    payload,
+                });
+
+                if (payload?.type === "manMachine" || payload?.code === 87001) {
+                    break;
+                }
+            }
+        }
+
+        throw new Error(
+            lastErrorMessage
+                ? `请求验证码失败：${lastErrorMessage}`
+                : "请求验证码失败，请稍后重试。"
+        );
+    }
+
     async login(sid: XiaomiSid) {
         await this.loadTokenStore();
         if (!this.token) {
@@ -2243,14 +2496,13 @@ export class XiaomiAccountClient {
                     [
                         `当前缺少继续获取 ${sid} 登录态所需的小米账号会话。`,
                         "这是旧版本残留的半登录状态：只保存了部分 sid token，没有保存 passToken。",
-                        "请重新走一次登录流程，新的版本会把恢复所需的账号态一并保存。",
+                        "请重新走一次登录流程。",
                     ].join(" ")
                 );
             }
             throw new Error(
                 [
                     `当前还没有可用于获取 ${sid} 登录态的小米账号会话。`,
-                    "请直接打开这次生成的登录入口完成一次登录；新的版本会把恢复所需的账号态一并保存。",
                 ].join(" ")
             );
         }

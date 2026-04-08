@@ -33,6 +33,8 @@ const UI_ASSET_FINGERPRINT_FILES = [
     resolveUiAssetFile("ui/xiaoai-console.css"),
     resolveUiAssetFile("ui/xiaoai-console.js"),
     resolveUiAssetFile("ui/favicon.svg"),
+    resolveUiAssetFile("fonts/manrope/wght.css"),
+    resolveUiAssetFile("fonts/noto-sans-sc/wght.css"),
     resolveUiAssetFile("fonts/manrope/files/manrope-latin-wght-normal.woff2"),
     resolveUiAssetFile("fonts/noto-sans-sc/files/noto-sans-sc-latin-wght-normal.woff2"),
 ];
@@ -50,10 +52,8 @@ function resolveUiAssetVersion() {
     }
 }
 
-const UI_ASSET_VERSION = resolveUiAssetVersion();
-
 export function uiAssetVersionQuery() {
-    return `?v=${encodeURIComponent(UI_ASSET_VERSION)}`;
+    return `?v=${encodeURIComponent(resolveUiAssetVersion())}`;
 }
 
 export function normalizeAssetBasePath(value?: string) {
@@ -114,8 +114,8 @@ export function renderSharedHead(title: string, assetBasePath: string) {
   <link rel="icon" href="${basePath}/ui/favicon.svg${assetVersion}" type="image/svg+xml">
   <link rel="shortcut icon" href="${basePath}/ui/favicon.svg${assetVersion}" type="image/svg+xml">
   <link rel="preload" href="${basePath}/ui/xiaoai-console.css${assetVersion}" as="style">
-  <link rel="preload" href="${basePath}/fonts/manrope/files/manrope-latin-wght-normal.woff2${assetVersion}" as="font" type="font/woff2" crossorigin="anonymous">
-  <link rel="preload" href="${basePath}/fonts/noto-sans-sc/files/noto-sans-sc-latin-wght-normal.woff2${assetVersion}" as="font" type="font/woff2" crossorigin="anonymous">
+  <link rel="stylesheet" href="${basePath}/fonts/noto-sans-sc/wght.css${assetVersion}">
+  <link rel="stylesheet" href="${basePath}/fonts/manrope/wght.css${assetVersion}">
   <link rel="stylesheet" href="${basePath}/ui/xiaoai-console.css${assetVersion}">
   ${renderThemeBootScript()}
 </head>`;
@@ -388,7 +388,7 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
         <section class="tab-panel" data-tab-panel="control" hidden>
           <div class="panel-screen-scroll control-screen-scroll">
             <div class="control-stack">
-              <section class="surface control-card">
+              <section class="surface control-card control-card-mode">
                 <div class="card-copy">
                   <span class="micro-label">工作模式</span>
                   <div class="card-meta">切换当前接管策略。</div>
@@ -410,7 +410,7 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 </div>
               </section>
 
-              <section class="surface control-card">
+              <section class="surface control-card control-card-wakeword">
                 <div class="card-head wakeword-card-head">
                   <div class="card-copy">
                     <span class="micro-label">唤醒词</span>
@@ -431,46 +431,167 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 </label>
               </section>
 
-              <section class="surface control-card">
+              <section class="surface control-card control-card-model">
                 <div class="card-copy">
                   <span class="micro-label">模型选择</span>
                   <div class="card-meta">更改 OpenClaw 配置里小爱 agent 的默认模型；保存后会自动重启网关。</div>
                 </div>
 
-                <label class="field-shell select-shell">
-                  <select
-                    id="openclawModelSelect"
-                    class="text-field select-field"
-                    autocomplete="off"
-                  >
-                    <option value="">正在读取可用模型…</option>
-                  </select>
+                <label class="field-shell">
+                  <div class="picker-shell">
+                    <div class="picker-root" id="openclawModelPicker">
+                      <select
+                        id="openclawModelSelect"
+                        class="picker-native"
+                        autocomplete="off"
+                      >
+                        <option value="">正在读取可用模型…</option>
+                      </select>
+                      <button
+                        class="picker-trigger"
+                        id="openclawModelPickerTrigger"
+                        type="button"
+                        aria-haspopup="listbox"
+                        aria-expanded="false"
+                        aria-controls="openclawModelPickerPanel"
+                      >
+                        <span class="picker-trigger-text" id="openclawModelPickerText">正在读取可用模型…</span>
+                        <span class="picker-chevron" aria-hidden="true"></span>
+                      </button>
+                      <div class="picker-panel" id="openclawModelPickerPanel" role="listbox" hidden></div>
+                    </div>
+                  </div>
                 </label>
                 <div class="card-meta" id="openclawModelDetail">当前正在读取 xiaoai agent 模型信息…</div>
               </section>
 
-              <section class="surface control-card">
-                <div class="card-head">
+              <section class="surface control-card control-card-route">
+                <div class="card-head route-card-head">
                   <div class="card-copy">
-                    <span class="micro-label">唤醒窗口</span>
-                    <div class="card-meta">唤醒模式下，OpenClaw 主动播报后继续接管后续对话的持续时间。离开输入框自动保存。</div>
+                    <span class="micro-label">插件通知渠道</span>
+                    <div class="card-meta">这里只影响登录通知、控制台链接和主动回推，不影响“小爱对话固定走 xiaoai agent”这条主链路。</div>
                   </div>
-                  <label class="dialog-window-inline-field metric">
-                    <input
-                      id="dialogWindowInput"
-                      type="text"
-                      inputmode="numeric"
-                      pattern="[0-9]*"
-                      value="30"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                    <span>秒</span>
+                  <div class="route-card-actions">
+                    <button class="soft-btn compact-btn" id="openclawRouteSaveBtn" type="button">保存</button>
+                    <button class="soft-btn compact-btn" id="openclawRouteDisableBtn" type="button">关闭通知</button>
+                  </div>
+                </div>
+
+                <div class="route-field-grid">
+                  <label class="field-shell">
+                    <span class="field-label">通知渠道</span>
+                    <div class="picker-shell">
+                      <div class="picker-root" id="openclawRouteChannelPicker">
+                        <select
+                          id="openclawRouteChannelSelect"
+                          class="picker-native"
+                          autocomplete="off"
+                        >
+                          <option value="">正在读取渠道…</option>
+                        </select>
+                        <button
+                          class="picker-trigger"
+                          id="openclawRouteChannelPickerTrigger"
+                          type="button"
+                          aria-haspopup="listbox"
+                          aria-expanded="false"
+                          aria-controls="openclawRouteChannelPickerPanel"
+                        >
+                          <span class="picker-trigger-text" id="openclawRouteChannelPickerText">正在读取渠道…</span>
+                          <span class="picker-chevron" aria-hidden="true"></span>
+                        </button>
+                        <div class="picker-panel" id="openclawRouteChannelPickerPanel" role="listbox" hidden></div>
+                      </div>
+                    </div>
+                  </label>
+
+                  <label class="field-shell">
+                    <span class="field-label">通知目标</span>
+                    <div class="picker-shell">
+                      <div class="picker-root" id="openclawRouteTargetPicker">
+                        <div class="picker-input-frame">
+                          <input
+                            id="openclawRouteTargetInput"
+                            class="picker-input"
+                            type="text"
+                            placeholder="例如：qqbot:c2c:openid 或 telegram chat id"
+                            autocomplete="off"
+                            spellcheck="false"
+                          />
+                          <button
+                            class="picker-input-toggle"
+                            id="openclawRouteTargetPickerToggle"
+                            type="button"
+                            aria-haspopup="listbox"
+                            aria-expanded="false"
+                            aria-controls="openclawRouteTargetPickerPanel"
+                          >
+                            <span class="picker-chevron" aria-hidden="true"></span>
+                          </button>
+                        </div>
+                        <div
+                          class="picker-panel picker-panel-inline"
+                          id="openclawRouteTargetPickerPanel"
+                          role="listbox"
+                          hidden
+                        ></div>
+                      </div>
+                    </div>
                   </label>
                 </div>
+                <div class="card-meta card-meta-break" id="openclawRouteDetail">当前正在读取插件通知渠道…</div>
               </section>
 
-              <section class="surface control-card">
+              <section class="surface control-card control-card-workspace">
+                <div class="card-head route-card-head">
+                  <div class="card-copy">
+                    <span class="micro-label">Workspace 提示文件</span>
+                    <div class="card-meta">统一编辑 xiaoai agent workspace 的 <code>AGENTS.md</code>、<code>IDENTITY.md</code>、<code>TOOLS.md</code>、<code>HEARTBEAT.md</code>、<code>BOOT.md</code>、<code>MEMORY.md</code>。留空保存会恢复默认内容；普通文件禁用后会清空内容并跳过注入，<code>BOOT.md</code> 会直接移除，<code>AGENTS.md</code> 作为核心提示文件不支持禁用。</div>
+                  </div>
+                  <div class="route-card-actions">
+                    <button class="soft-btn compact-btn" id="voiceSystemPromptSaveBtn" type="button">保存</button>
+                    <button class="soft-btn compact-btn" id="workspaceFileDisableBtn" type="button">禁用文件</button>
+                  </div>
+                </div>
+
+                <label class="field-shell">
+                  <span class="field-label">选择文件</span>
+                  <div class="picker-shell">
+                    <div class="picker-root" id="workspaceFilePicker">
+                      <select
+                        id="workspaceFileSelect"
+                        class="picker-native"
+                      >
+                        <option value="agents">系统提示词（AGENTS.md）</option>
+                      </select>
+                      <button
+                        class="picker-trigger"
+                        id="workspaceFilePickerTrigger"
+                        type="button"
+                        aria-haspopup="listbox"
+                        aria-expanded="false"
+                        aria-controls="workspaceFilePickerPanel"
+                      >
+                        <span class="picker-trigger-text" id="workspaceFilePickerText">系统提示词（AGENTS.md）</span>
+                        <span class="picker-chevron" aria-hidden="true"></span>
+                      </button>
+                      <div class="picker-panel" id="workspaceFilePickerPanel" role="listbox" hidden></div>
+                    </div>
+                  </div>
+                </label>
+
+                <label class="field-shell">
+                  <textarea
+                    id="voiceSystemPromptInput"
+                    class="text-area voice-system-prompt-input"
+                    placeholder="输入要写入 xiaoai agent workspace 文件的内容"
+                    spellcheck="false"
+                  ></textarea>
+                </label>
+                <div class="card-meta card-meta-break" id="workspaceFileDetail">当前正在读取 xiaoai agent workspace 文件状态…</div>
+              </section>
+
+              <section class="surface control-card control-card-debug-log">
                 <div class="card-head toggle-card-head">
                   <div class="card-copy">
                     <span class="micro-label">打开日志</span>
@@ -487,7 +608,24 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 </div>
               </section>
 
-              <section class="surface control-card">
+              <section class="surface control-card control-card-thinking">
+                <div class="card-head toggle-card-head">
+                  <div class="card-copy">
+                    <span class="micro-label">打开思考</span>
+                    <div class="card-meta">默认关闭。关闭时会给语音转发默认附加 <code>--thinking off</code>，一般更快；打开后更适合复杂问题，需要模型支持。</div>
+                  </div>
+                  <button
+                    class="soft-btn compact-btn toggle-pill-btn"
+                    id="thinkingOffToggle"
+                    type="button"
+                    aria-pressed="false"
+                  >
+                    <strong id="thinkingOffLabel">已关闭</strong>
+                  </button>
+                </div>
+              </section>
+
+              <section class="surface control-card control-card-context">
                 <div class="card-head context-memory-head">
                   <div class="card-copy">
                     <span class="micro-label">上下文记忆</span>
@@ -522,26 +660,28 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 </div>
               </section>
 
-              <section class="surface control-card">
-                <div class="card-head voice-prompt-card-head">
+              <section class="surface control-card control-card-dialog-window">
+                <div class="card-head">
                   <div class="card-copy">
-                    <span class="micro-label">系统提示词</span>
-                    <div class="card-meta">这里会直接写入专属 workspace 的 <code>AGENTS.md</code>，由 OpenClaw bootstrap 机制在每轮自动注入，留空可恢复默认。小上下文模型建议把这段写得更短一些。</div>
+                    <span class="micro-label">唤醒窗口</span>
+                    <div class="card-meta">唤醒模式下，OpenClaw 主动播报后继续接管后续对话的持续时间。离开输入框自动保存。</div>
                   </div>
-                  <button class="soft-btn compact-btn" id="voiceSystemPromptSaveBtn" type="button">保存</button>
+                  <label class="dialog-window-inline-field metric">
+                    <input
+                      id="dialogWindowInput"
+                      type="text"
+                      inputmode="numeric"
+                      pattern="[0-9]*"
+                      value="30"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <span>秒</span>
+                  </label>
                 </div>
-
-                <label class="field-shell">
-                  <textarea
-                    id="voiceSystemPromptInput"
-                    class="text-area voice-system-prompt-input"
-                    placeholder="输入要写入 xiaoai agent workspace / AGENTS.md 的提示词"
-                    spellcheck="false"
-                  ></textarea>
-                </label>
               </section>
 
-              <section class="surface control-card">
+              <section class="surface control-card control-card-transition">
                 <div class="card-head voice-prompt-card-head">
                   <div class="card-copy">
                     <span class="micro-label">过渡播报词</span>
@@ -560,24 +700,7 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 </label>
               </section>
 
-              <section class="surface control-card">
-                <div class="card-head toggle-card-head">
-                  <div class="card-copy">
-                    <span class="micro-label">打开思考</span>
-                    <div class="card-meta">默认关闭。关闭时会给语音转发默认附加 <code>--thinking off</code>，一般更快；打开后更适合复杂问题，需要模型支持。</div>
-                  </div>
-                  <button
-                    class="soft-btn compact-btn toggle-pill-btn"
-                    id="thinkingOffToggle"
-                    type="button"
-                    aria-pressed="false"
-                  >
-                    <strong id="thinkingOffLabel">已关闭</strong>
-                  </button>
-                </div>
-              </section>
-
-              <section class="surface control-card">
+              <section class="surface control-card control-card-non-streaming">
                 <div class="card-head toggle-card-head">
                   <div class="card-copy">
                     <span class="micro-label">强制走非流式请求</span>
@@ -594,7 +717,20 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 </div>
               </section>
 
-              <section class="surface control-card">
+              <section class="surface control-card control-card-audio-calibration">
+                <div class="card-head wake-action-head">
+                  <div class="card-copy">
+                    <span class="micro-label">音频时序校准</span>
+                    <div class="card-meta">用静音样本跑几轮播放与停止，更新当前音箱的音频检测和收敛估计；不会发出实际声音。下方空余延迟数值可直接修改。</div>
+                  </div>
+                  <button class="soft-btn compact-btn" id="audioCalibrationBtn" type="button">开始静音校准</button>
+                </div>
+
+                <div class="control-metric-grid audio-calibration-grid" id="audioCalibrationMetrics"></div>
+                <div class="card-meta card-meta-break" id="audioCalibrationDetail">当前还没有静音校准结果。</div>
+              </section>
+
+              <section class="surface control-card control-card-remote-wake">
                 <div class="card-head wake-action-head">
                   <div class="card-copy">
                     <span class="micro-label">远程唤醒</span>

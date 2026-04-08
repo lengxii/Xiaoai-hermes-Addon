@@ -4,6 +4,8 @@ const TAB_ORDER = ["overview", "chat", "control", "events"];
 const DEFAULT_DIALOG_WINDOW_SECONDS = 30;
 const MIN_DIALOG_WINDOW_SECONDS = 5;
 const MAX_DIALOG_WINDOW_SECONDS = 300;
+const DEFAULT_AUDIO_TAIL_PADDING_MS = 1500;
+const MAX_AUDIO_TAIL_PADDING_MS = 10000;
 const DEFAULT_VOICE_CONTEXT_TURNS = 6;
 const DEFAULT_VOICE_CONTEXT_CHARS = 1400;
 const MAX_VOICE_CONTEXT_TURNS = 24;
@@ -111,15 +113,82 @@ function initThemeSystem() {
 
 function initAccessPage() {
   const accessTokenInput = byId("accessTokenInput");
+  const accessForm = accessTokenInput ? accessTokenInput.form : null;
 
-  if (accessTokenInput) {
-    window.setTimeout(() => {
-      accessTokenInput.focus();
-    }, 80);
+  if (!accessTokenInput) {
+    return;
   }
+
+  const locationUrl = new URL(window.location.href);
+  const hashParams = new URLSearchParams(locationUrl.hash.replace(/^#/, ""));
+  const accessToken =
+    locationUrl.searchParams.get("access_token") ||
+    hashParams.get("access_token") ||
+    (() => {
+      try {
+        return window.sessionStorage.getItem("xiaoai_console_access_token");
+      } catch (_) {
+        return "";
+      }
+    })() ||
+    "";
+
+  if (accessToken) {
+    accessTokenInput.value = accessToken;
+    try {
+      window.sessionStorage.setItem("xiaoai_console_access_token", accessToken);
+    } catch (_) {}
+  }
+
+  if (accessToken && accessForm) {
+    const autoSubmitKey = `xiaoai_console_access_autosubmit:${locationUrl.pathname}:${accessToken}`;
+    let shouldAutoSubmit = true;
+    try {
+      shouldAutoSubmit = window.sessionStorage.getItem(autoSubmitKey) !== "1";
+      if (shouldAutoSubmit) {
+        window.sessionStorage.setItem(autoSubmitKey, "1");
+      }
+    } catch (_) {}
+
+    if (shouldAutoSubmit) {
+      window.setTimeout(() => {
+        if (typeof accessForm.requestSubmit === "function") {
+          accessForm.requestSubmit();
+        } else {
+          accessForm.submit();
+        }
+      }, 60);
+      return;
+    }
+  }
+
+  window.setTimeout(() => {
+    accessTokenInput.focus();
+  }, 80);
 }
 
 function initConsolePage() {
+  const locationUrl = new URL(window.location.href);
+  const consoleAccessToken =
+    locationUrl.searchParams.get("access_token") ||
+    (() => {
+      try {
+        return window.sessionStorage.getItem("xiaoai_console_access_token");
+      } catch (_) {
+        return "";
+      }
+    })() ||
+    "";
+
+  if (consoleAccessToken) {
+    try {
+      window.sessionStorage.setItem(
+        "xiaoai_console_access_token",
+        consoleAccessToken
+      );
+    } catch (_) {}
+  }
+
   const API = {
     bootstrap: new URL("./api/bootstrap", window.location.href),
     conversations: new URL("./api/conversations", window.location.href),
@@ -136,8 +205,12 @@ function initConsolePage() {
     dialogWindow: new URL("./api/device/dialog-window", window.location.href),
     thinking: new URL("./api/openclaw/thinking", window.location.href),
     nonStreaming: new URL("./api/openclaw/non-streaming", window.location.href),
+    audioCalibration: new URL("./api/device/audio-calibration", window.location.href),
+    audioTailPadding: new URL("./api/device/audio-tail-padding", window.location.href),
     openclawModel: new URL("./api/openclaw/model", window.location.href),
+    openclawRoute: new URL("./api/openclaw/route", window.location.href),
     voiceSystemPrompt: new URL("./api/openclaw/voice-system-prompt", window.location.href),
+    workspaceFile: new URL("./api/openclaw/workspace-file", window.location.href),
     transitionPhrases: new URL("./api/device/transition-phrases", window.location.href),
     debugLog: new URL("./api/debug-log", window.location.href),
     voiceContext: new URL("./api/openclaw/voice-context", window.location.href),
@@ -174,13 +247,17 @@ function initConsolePage() {
     currentDialogWindowValue: DEFAULT_DIALOG_WINDOW_SECONDS,
     dialogWindowDirty: false,
     dialogWindowSaving: false,
+    controlScrollRevision: 0,
     currentVoiceContextTurnsValue: DEFAULT_VOICE_CONTEXT_TURNS,
     currentVoiceContextCharsValue: DEFAULT_VOICE_CONTEXT_CHARS,
     voiceContextDirty: false,
     voiceContextSaving: false,
     currentVoiceSystemPromptValue: "",
-    voiceSystemPromptDirty: false,
-    voiceSystemPromptSaving: false,
+    openclawWorkspaceFiles: [],
+    selectedWorkspaceFileId: "agents",
+    workspaceFileDrafts: {},
+    workspaceFileDirty: {},
+    workspaceFileSaving: false,
     currentTransitionPhrasesValue: "",
     transitionPhrasesDirty: false,
     transitionPhrasesSaving: false,
@@ -201,11 +278,23 @@ function initConsolePage() {
     thinkingSaving: false,
     forceNonStreamingEnabled: false,
     forceNonStreamingSaving: false,
+    audioCalibrationRunning: false,
+    currentAudioTailPaddingMs: DEFAULT_AUDIO_TAIL_PADDING_MS,
+    confirmedAudioTailPaddingMs: DEFAULT_AUDIO_TAIL_PADDING_MS,
+    audioTailPaddingEditing: false,
+    audioTailPaddingDirty: false,
+    audioTailPaddingSaving: false,
     openclawAgentId: "xiaoai",
     openclawModel: "",
     openclawModels: [],
     openclawModelLoading: false,
     openclawModelSaving: false,
+    openclawRouteChannel: "",
+    openclawRouteTarget: "",
+    openclawRouteChannels: [],
+    openclawRouteEnabled: false,
+    openclawRouteDirty: false,
+    openclawRouteSaving: false,
     debugLogEnabled: true,
     debugLogSaving: false,
     browserAudioReady: false,
@@ -221,11 +310,13 @@ function initConsolePage() {
     speakerProgressBaseAtMs: 0,
     speakerProgressBasePositionSeconds: 0,
     speakerProgressDurationSeconds: 0,
-    controlMasonryFrame: 0,
-    controlMasonryObserver: null,
   };
 
   const els = {
+    controlStack: document.querySelector(".control-stack"),
+    controlColumns: Array.from(document.querySelectorAll(".control-column")),
+    controlCards: Array.from(document.querySelectorAll(".control-card")),
+    controlScreenScroll: document.querySelector(".control-screen-scroll"),
     statDevice: byId("statDevice"),
     statDeviceMeta: byId("statDeviceMeta"),
     deviceStatusText: byId("deviceStatusText"),
@@ -264,6 +355,13 @@ function initConsolePage() {
     wakeBtn: byId("wakeBtn"),
     wakeWordInput: byId("wakeWordInput"),
     wakeWordSaveBtn: byId("wakeWordSaveBtn"),
+    workspaceFileSelect: byId("workspaceFileSelect"),
+    workspaceFilePicker: byId("workspaceFilePicker"),
+    workspaceFilePickerTrigger: byId("workspaceFilePickerTrigger"),
+    workspaceFilePickerText: byId("workspaceFilePickerText"),
+    workspaceFilePickerPanel: byId("workspaceFilePickerPanel"),
+    workspaceFileDisableBtn: byId("workspaceFileDisableBtn"),
+    workspaceFileDetail: byId("workspaceFileDetail"),
     voiceSystemPromptInput: byId("voiceSystemPromptInput"),
     voiceSystemPromptSaveBtn: byId("voiceSystemPromptSaveBtn"),
     transitionPhrasesInput: byId("transitionPhrasesInput"),
@@ -272,8 +370,32 @@ function initConsolePage() {
     thinkingOffLabel: byId("thinkingOffLabel"),
     forceNonStreamingToggle: byId("forceNonStreamingToggle"),
     forceNonStreamingLabel: byId("forceNonStreamingLabel"),
+    audioCalibrationBtn: byId("audioCalibrationBtn"),
+    audioCalibrationMetrics: byId("audioCalibrationMetrics"),
+    audioCalibrationDetail: byId("audioCalibrationDetail"),
+    audioTailPaddingValue: byId("audioTailPaddingValue"),
+    audioTailPaddingNote: byId("audioTailPaddingNote"),
+    audioCalibrationPlaybackDetectValue: byId("audioCalibrationPlaybackDetectValue"),
+    audioCalibrationStopSettleValue: byId("audioCalibrationStopSettleValue"),
+    audioCalibrationStatusProbeValue: byId("audioCalibrationStatusProbeValue"),
     openclawModelSelect: byId("openclawModelSelect"),
+    openclawModelPicker: byId("openclawModelPicker"),
+    openclawModelPickerTrigger: byId("openclawModelPickerTrigger"),
+    openclawModelPickerText: byId("openclawModelPickerText"),
+    openclawModelPickerPanel: byId("openclawModelPickerPanel"),
     openclawModelDetail: byId("openclawModelDetail"),
+    openclawRouteChannelSelect: byId("openclawRouteChannelSelect"),
+    openclawRouteChannelPicker: byId("openclawRouteChannelPicker"),
+    openclawRouteChannelPickerTrigger: byId("openclawRouteChannelPickerTrigger"),
+    openclawRouteChannelPickerText: byId("openclawRouteChannelPickerText"),
+    openclawRouteChannelPickerPanel: byId("openclawRouteChannelPickerPanel"),
+    openclawRouteTargetInput: byId("openclawRouteTargetInput"),
+    openclawRouteTargetPicker: byId("openclawRouteTargetPicker"),
+    openclawRouteTargetPickerToggle: byId("openclawRouteTargetPickerToggle"),
+    openclawRouteTargetPickerPanel: byId("openclawRouteTargetPickerPanel"),
+    openclawRouteDetail: byId("openclawRouteDetail"),
+    openclawRouteSaveBtn: byId("openclawRouteSaveBtn"),
+    openclawRouteDisableBtn: byId("openclawRouteDisableBtn"),
     debugLogToggle: byId("debugLogToggle"),
     debugLogLabel: byId("debugLogLabel"),
     volumeSlider: byId("volumeSlider"),
@@ -296,7 +418,6 @@ function initConsolePage() {
     currentAudioStartBtn: byId("currentAudioStartBtn"),
     currentAudioPauseBtn: byId("currentAudioPauseBtn"),
     currentAudioStopBtn: byId("currentAudioStopBtn"),
-    controlStack: document.querySelector(".control-stack"),
     toast: byId("toast"),
     tabButtons: Array.from(document.querySelectorAll("[data-console-tab]")),
     tabPanels: Array.from(document.querySelectorAll("[data-tab-panel]")),
@@ -305,6 +426,315 @@ function initConsolePage() {
     ),
     modeButtons: Array.from(document.querySelectorAll("[data-mode-choice]")),
   };
+
+  const CONTROL_CARD_CLASS_ORDER = [
+    "control-card-mode",
+    "control-card-wakeword",
+    "control-card-model",
+    "control-card-route",
+    "control-card-workspace",
+    "control-card-debug-log",
+    "control-card-thinking",
+    "control-card-context",
+    "control-card-dialog-window",
+    "control-card-transition",
+    "control-card-non-streaming",
+    "control-card-audio-calibration",
+    "control-card-remote-wake",
+  ];
+
+  const selectPickerConfigs = [
+    {
+      select: els.openclawModelSelect,
+      root: els.openclawModelPicker,
+      trigger: els.openclawModelPickerTrigger,
+      text: els.openclawModelPickerText,
+      panel: els.openclawModelPickerPanel,
+      emptyText: "未读取到可用模型",
+    },
+    {
+      select: els.openclawRouteChannelSelect,
+      root: els.openclawRouteChannelPicker,
+      trigger: els.openclawRouteChannelPickerTrigger,
+      text: els.openclawRouteChannelPickerText,
+      panel: els.openclawRouteChannelPickerPanel,
+      emptyText: "未检测到已配置渠道",
+    },
+    {
+      select: els.workspaceFileSelect,
+      root: els.workspaceFilePicker,
+      trigger: els.workspaceFilePickerTrigger,
+      text: els.workspaceFilePickerText,
+      panel: els.workspaceFilePickerPanel,
+      emptyText: "当前没有可编辑文件",
+    },
+  ];
+
+  let activePickerRoot = null;
+
+  function restoreControlScrollTop(scrollTop) {
+    if (!els.controlScreenScroll || !Number.isFinite(scrollTop)) {
+      return;
+    }
+    els.controlScreenScroll.scrollTop = Math.max(0, scrollTop);
+  }
+
+  function scheduleControlMasonryLayout() {}
+
+  function initControlMasonry() {}
+
+  function setPickerOpen(root, open) {
+    if (!root) {
+      return;
+    }
+    const panel = root.querySelector(".picker-panel");
+    const toggle = root.querySelector("[aria-controls]");
+    root.dataset.pickerOpen = open ? "true" : "false";
+    if (panel) {
+      panel.hidden = !open;
+    }
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", String(open));
+    }
+    if (!open && activePickerRoot === root) {
+      activePickerRoot = null;
+    } else if (open) {
+      activePickerRoot = root;
+    }
+  }
+
+  function closeAllPickers(exceptRoot) {
+    selectPickerConfigs.forEach((config) => {
+      if (config.root && config.root !== exceptRoot) {
+        setPickerOpen(config.root, false);
+      }
+    });
+    if (
+      els.openclawRouteTargetPicker &&
+      els.openclawRouteTargetPicker !== exceptRoot
+    ) {
+      setPickerOpen(els.openclawRouteTargetPicker, false);
+    }
+  }
+
+  function createPickerOption(label, note, active, onSelect) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = `picker-option${active ? " is-active" : ""}`;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(active));
+    option.innerHTML = note
+      ? `<span class="picker-option-label">${escapeHtml(label)}</span><span class="picker-option-note">${escapeHtml(note)}</span>`
+      : `<span class="picker-option-label">${escapeHtml(label)}</span>`;
+    option.addEventListener("click", onSelect);
+    return option;
+  }
+
+  function createPickerEmpty(text) {
+    const empty = document.createElement("div");
+    empty.className = "picker-empty";
+    empty.textContent = text;
+    return empty;
+  }
+
+  function syncSelectPicker(config) {
+    if (
+      !config ||
+      !config.select ||
+      !config.root ||
+      !config.trigger ||
+      !config.text ||
+      !config.panel
+    ) {
+      return;
+    }
+
+    const options = Array.from(config.select.options || []);
+    const selected =
+      options.find((option) => option.selected) || options[0] || null;
+    config.text.textContent =
+      (selected && String(selected.textContent || "").trim()) || config.emptyText;
+    config.trigger.disabled = config.select.disabled;
+    config.panel.replaceChildren();
+
+    if (!options.length) {
+      config.panel.appendChild(createPickerEmpty(config.emptyText));
+    } else {
+      options.forEach((option) => {
+        const label = String(option.textContent || "").trim() || config.emptyText;
+        config.panel.appendChild(
+          createPickerOption(
+            label,
+            "",
+            Boolean(selected && option.value === selected.value),
+            () => {
+              if (config.select.disabled) {
+                return;
+              }
+              if (config.select.value !== option.value) {
+                config.select.value = option.value;
+                config.select.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+              syncSelectPicker(config);
+              setPickerOpen(config.root, false);
+              config.trigger.focus();
+            }
+          )
+        );
+      });
+    }
+
+    if (config.trigger.disabled) {
+      setPickerOpen(config.root, false);
+    }
+  }
+
+  function getOpenclawRouteTargetSuggestions() {
+    const currentChannel = state.openclawRouteChannels.find(
+      (item) => item.id === state.openclawRouteChannel
+    );
+    return currentChannel ? currentChannel.targets : [];
+  }
+
+  function syncRouteTargetPicker() {
+    if (
+      !els.openclawRouteTargetPicker ||
+      !els.openclawRouteTargetInput ||
+      !els.openclawRouteTargetPickerToggle ||
+      !els.openclawRouteTargetPickerPanel
+    ) {
+      return;
+    }
+
+    const suggestions = getOpenclawRouteTargetSuggestions();
+    const currentValue = String(els.openclawRouteTargetInput.value || "").trim();
+    els.openclawRouteTargetPickerPanel.replaceChildren();
+    els.openclawRouteTargetPickerToggle.disabled =
+      els.openclawRouteTargetInput.disabled;
+
+    if (!suggestions.length) {
+      els.openclawRouteTargetPickerPanel.appendChild(
+        createPickerEmpty("当前渠道暂无候选目标，可直接手动填写。")
+      );
+    } else {
+      suggestions.forEach((target) => {
+        els.openclawRouteTargetPickerPanel.appendChild(
+          createPickerOption(target, "", currentValue === target, () => {
+            if (!els.openclawRouteTargetInput || els.openclawRouteTargetInput.disabled) {
+              return;
+            }
+            els.openclawRouteTargetInput.value = target;
+            els.openclawRouteTargetInput.dispatchEvent(
+              new Event("input", { bubbles: true })
+            );
+            syncRouteTargetPicker();
+            setPickerOpen(els.openclawRouteTargetPicker, false);
+            els.openclawRouteTargetInput.focus();
+          })
+        );
+      });
+    }
+
+    if (els.openclawRouteTargetPickerToggle.disabled) {
+      setPickerOpen(els.openclawRouteTargetPicker, false);
+    }
+  }
+
+  function syncCustomPickers() {
+    selectPickerConfigs.forEach((config) => {
+      syncSelectPicker(config);
+    });
+    syncRouteTargetPicker();
+  }
+
+  function bindSelectPicker(config) {
+    if (!config || !config.root || !config.trigger || !config.select) {
+      return;
+    }
+
+    const togglePicker = () => {
+      if (config.trigger.disabled) {
+        return;
+      }
+      const nextOpen = config.root.dataset.pickerOpen !== "true";
+      closeAllPickers(nextOpen ? config.root : null);
+      setPickerOpen(config.root, nextOpen);
+    };
+
+    config.trigger.addEventListener("click", () => {
+      togglePicker();
+    });
+    config.trigger.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setPickerOpen(config.root, false);
+        return;
+      }
+      if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+        event.preventDefault();
+        togglePicker();
+      }
+    });
+    config.select.addEventListener("change", () => {
+      syncSelectPicker(config);
+    });
+  }
+
+  function initCustomPickers() {
+    selectPickerConfigs.forEach((config) => {
+      bindSelectPicker(config);
+    });
+
+    if (els.openclawRouteTargetPicker && els.openclawRouteTargetPickerToggle) {
+      els.openclawRouteTargetPickerToggle.addEventListener("click", () => {
+        const nextOpen =
+          els.openclawRouteTargetPicker.dataset.pickerOpen !== "true";
+        closeAllPickers(nextOpen ? els.openclawRouteTargetPicker : null);
+        setPickerOpen(els.openclawRouteTargetPicker, nextOpen);
+      });
+    }
+
+    if (els.openclawRouteTargetInput && els.openclawRouteTargetPicker) {
+      els.openclawRouteTargetInput.addEventListener("focus", () => {
+        if (!getOpenclawRouteTargetSuggestions().length) {
+          return;
+        }
+        closeAllPickers(els.openclawRouteTargetPicker);
+        setPickerOpen(els.openclawRouteTargetPicker, true);
+      });
+      els.openclawRouteTargetInput.addEventListener("input", () => {
+        syncRouteTargetPicker();
+      });
+      els.openclawRouteTargetInput.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          setPickerOpen(els.openclawRouteTargetPicker, false);
+          return;
+        }
+        if (event.key === "ArrowDown" && getOpenclawRouteTargetSuggestions().length) {
+          event.preventDefault();
+          closeAllPickers(els.openclawRouteTargetPicker);
+          setPickerOpen(els.openclawRouteTargetPicker, true);
+        }
+      });
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (
+        activePickerRoot &&
+        target instanceof Node &&
+        !activePickerRoot.contains(target)
+      ) {
+        closeAllPickers();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeAllPickers();
+      }
+    });
+    syncCustomPickers();
+  }
 
   function showToast(message, tone) {
     if (!els.toast) {
@@ -390,119 +820,6 @@ function initConsolePage() {
       return;
     }
     renderEvents(state.eventItems, { signature: nextSignature });
-  }
-
-  function clearControlMasonryLayout(options) {
-    const preserveObserver = Boolean(options && options.preserveObserver);
-    if (state.controlMasonryFrame) {
-      window.cancelAnimationFrame(state.controlMasonryFrame);
-      state.controlMasonryFrame = 0;
-    }
-    if (!preserveObserver && state.controlMasonryObserver) {
-      state.controlMasonryObserver.disconnect();
-      state.controlMasonryObserver = null;
-    }
-    if (!els.controlStack) {
-      return;
-    }
-    els.controlStack.classList.remove("is-masonry-ready");
-    els.controlStack.style.removeProperty("height");
-    els.controlStack.querySelectorAll(".control-card").forEach((card) => {
-      card.style.gridRowEnd = "";
-      card.style.position = "";
-      card.style.left = "";
-      card.style.top = "";
-      card.style.width = "";
-    });
-  }
-
-  function shouldUseControlMasonryLayout() {
-    return Boolean(
-      els.controlStack &&
-        window.matchMedia &&
-        window.matchMedia("(min-width: 961px)").matches
-    );
-  }
-
-  function applyControlMasonryLayout() {
-    if (!els.controlStack) {
-      return;
-    }
-    if (!shouldUseControlMasonryLayout()) {
-      clearControlMasonryLayout({ preserveObserver: true });
-      return;
-    }
-    const stack = els.controlStack;
-    const cards = Array.from(stack.querySelectorAll(".control-card"));
-    if (!cards.length) {
-      clearControlMasonryLayout({ preserveObserver: true });
-      return;
-    }
-
-    clearControlMasonryLayout({ preserveObserver: true });
-    stack.classList.add("is-masonry-ready");
-
-    const stackStyle = window.getComputedStyle(stack);
-    const gap =
-      Number.parseFloat(stackStyle.getPropertyValue("--control-stack-gap")) ||
-      Number.parseFloat(stackStyle.columnGap) ||
-      Number.parseFloat(stackStyle.gap) ||
-      12;
-    const columnCount = 2;
-    const stackWidth = stack.clientWidth;
-    const columnWidth = (stackWidth - gap * (columnCount - 1)) / columnCount;
-    if (!Number.isFinite(columnWidth) || columnWidth <= 0) {
-      clearControlMasonryLayout({ preserveObserver: true });
-      return;
-    }
-
-    const columnHeights = new Array(columnCount).fill(0);
-    cards.forEach((card) => {
-      let column = 0;
-      for (let index = 1; index < columnCount; index += 1) {
-        if (columnHeights[index] < columnHeights[column]) {
-          column = index;
-        }
-      }
-      card.style.position = "absolute";
-      card.style.width = `${columnWidth}px`;
-      card.style.left = `${column * (columnWidth + gap)}px`;
-      card.style.top = `${columnHeights[column]}px`;
-      columnHeights[column] += card.offsetHeight + gap;
-    });
-
-    stack.style.height = `${Math.max(0, Math.max(...columnHeights) - gap)}px`;
-  }
-
-  function scheduleControlMasonryLayout() {
-    if (state.controlMasonryFrame) {
-      window.cancelAnimationFrame(state.controlMasonryFrame);
-    }
-    state.controlMasonryFrame = window.requestAnimationFrame(() => {
-      state.controlMasonryFrame = 0;
-      applyControlMasonryLayout();
-    });
-  }
-
-  function installControlMasonryLayout() {
-    clearControlMasonryLayout();
-    if (!els.controlStack) {
-      return;
-    }
-    if (typeof ResizeObserver === "function") {
-      const observer = new ResizeObserver(() => {
-        scheduleControlMasonryLayout();
-      });
-      if (els.controlStack.parentElement) {
-        observer.observe(els.controlStack.parentElement);
-      }
-      els.controlStack.querySelectorAll(".control-card").forEach((card) => {
-        observer.observe(card);
-      });
-      state.controlMasonryObserver = observer;
-    }
-    window.addEventListener("resize", scheduleControlMasonryLayout);
-    scheduleControlMasonryLayout();
   }
 
   function readSpeakerAudioParts() {
@@ -1595,6 +1912,11 @@ function initConsolePage() {
     }
     try {
       const url = new URL(rawUrl, window.location.href);
+      const currentUrl = new URL(window.location.href);
+      if (url.origin !== currentUrl.origin) {
+        url.protocol = currentUrl.protocol;
+        url.host = currentUrl.host;
+      }
       url.searchParams.set("embedded", "1");
       return url.toString();
     } catch (_) {
@@ -1611,7 +1933,20 @@ function initConsolePage() {
   }
 
   function closeLoginWorkspace() {
+    if (els.loginWorkspaceFrame) {
+      els.loginWorkspaceFrame.src = "about:blank";
+    }
     setLoginWorkspaceVisibility(false);
+  }
+
+  function createLoginWorkspaceFrameUrl(loginUrl) {
+    try {
+      const url = new URL(loginUrl, window.location.href);
+      url.searchParams.set("_ui", String(Date.now()));
+      return url.toString();
+    } catch (_) {
+      return loginUrl;
+    }
   }
 
   function maskAccountLabel(rawValue) {
@@ -1690,9 +2025,10 @@ function initConsolePage() {
     if (!loginUrl) {
       return false;
     }
+    const frameUrl = createLoginWorkspaceFrameUrl(loginUrl);
     state.loginWorkspaceUrl = loginUrl;
-    if (els.loginWorkspaceFrame && els.loginWorkspaceFrame.src !== loginUrl) {
-      els.loginWorkspaceFrame.src = loginUrl;
+    if (els.loginWorkspaceFrame) {
+      els.loginWorkspaceFrame.src = frameUrl;
     }
     if (els.loginWorkspaceExternal) {
       els.loginWorkspaceExternal.href = loginUrl;
@@ -1713,6 +2049,9 @@ function initConsolePage() {
         credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
+          ...(consoleAccessToken
+            ? { "x-xiaoai-console-token": consoleAccessToken }
+            : {}),
           ...(options && options.headers ? options.headers : {}),
         },
         ...options,
@@ -1818,8 +2157,10 @@ function initConsolePage() {
       refreshBootstrap(true);
     }
     if (nextTab === "control") {
-      scheduleControlMasonryLayout();
       refreshOpenclawModelState(true);
+      window.requestAnimationFrame(() => {
+        scheduleControlMasonryLayout();
+      });
     }
   }
 
@@ -1860,6 +2201,14 @@ function initConsolePage() {
     return date.toLocaleString("zh-CN", {
       hour12: false,
     });
+  }
+
+  function formatLatencyEstimate(value) {
+    const safe = Number(value);
+    if (!Number.isFinite(safe) || safe <= 0) {
+      return "未采样";
+    }
+    return `${Math.round(safe)} ms`;
   }
 
   function dateKey(value) {
@@ -1946,9 +2295,57 @@ function initConsolePage() {
     return String(clamp(Number(digits) || 0, 0, max));
   }
 
+  function normalizeDecimalText(value, options) {
+    const max =
+      options && typeof options.max === "number" ? Math.max(0, options.max) : Infinity;
+    const scale =
+      options && typeof options.scale === "number"
+        ? Math.max(0, Math.floor(options.scale))
+        : 1;
+    const raw = String(value == null ? "" : value)
+      .replace(/,/g, ".")
+      .replace(/[^\d.]/g, "");
+    if (!raw) {
+      return "";
+    }
+    const hasTrailingDot = raw.endsWith(".");
+    const parts = raw.split(".");
+    const integerPart = (parts.shift() || "").replace(/^0+(?=\d)/, "") || "0";
+    const fractionPart = parts.join("").slice(0, scale);
+    const normalized =
+      scale > 0 && (fractionPart || hasTrailingDot)
+        ? `${integerPart}.${fractionPart}`
+        : integerPart;
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed)) {
+      return "";
+    }
+    const clampedValue = clamp(parsed, 0, max);
+    if (clampedValue !== parsed) {
+      return scale > 0
+        ? String(clampedValue.toFixed(scale))
+            .replace(/\.0+$/, "")
+            .replace(/(\.\d*?)0+$/, "$1")
+        : String(Math.round(clampedValue));
+    }
+    if (scale > 0 && hasTrailingDot && !fractionPart) {
+      return `${integerPart}.`;
+    }
+    return normalized;
+  }
+
   function getFiniteNumber(value, fallback) {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function formatAudioTailPaddingSeconds(value) {
+    const safeMs = clamp(
+      Math.round(Number(value) || 0),
+      0,
+      MAX_AUDIO_TAIL_PADDING_MS
+    );
+    return String(Number((safeMs / 1000).toFixed(1)));
   }
 
   function normalizeVoiceSystemPromptInput(value) {
@@ -2029,6 +2426,13 @@ function initConsolePage() {
     return normalizeIntegerText(value, 100);
   }
 
+  function sanitizeAudioTailPaddingText(value) {
+    return normalizeDecimalText(value, {
+      max: MAX_AUDIO_TAIL_PADDING_MS / 1000,
+      scale: 1,
+    });
+  }
+
   function syncVolumeMetricText(value, options) {
     if (!els.statVolume) {
       return;
@@ -2043,6 +2447,24 @@ function initConsolePage() {
     }
   }
 
+  function syncAudioTailPaddingMetricText(value, options) {
+    if (!els.audioTailPaddingValue) {
+      return;
+    }
+    const text = formatAudioTailPaddingSeconds(value);
+    const force = Boolean(options && options.force);
+    if (
+      !force &&
+      state.audioTailPaddingEditing &&
+      document.activeElement === els.audioTailPaddingValue
+    ) {
+      return;
+    }
+    if (els.audioTailPaddingValue.textContent !== text) {
+      els.audioTailPaddingValue.textContent = text;
+    }
+  }
+
   function updateVolumeDisplay(value, options) {
     const safe = clamp(Number(value) || 0, 0, 100);
     state.currentVolumeValue = safe;
@@ -2053,6 +2475,22 @@ function initConsolePage() {
       els.volumeSlider.value = String(safe);
     }
     syncVolumeMetricText(safe, { force: Boolean(options && options.forceText) });
+    return safe;
+  }
+
+  function updateAudioTailPaddingDisplay(value, options) {
+    const safe = clamp(
+      Math.round(Number(value) || 0),
+      0,
+      MAX_AUDIO_TAIL_PADDING_MS
+    );
+    state.currentAudioTailPaddingMs = safe;
+    if (!state.audioTailPaddingEditing || Boolean(options && options.forceText)) {
+      state.confirmedAudioTailPaddingMs = safe;
+    }
+    syncAudioTailPaddingMetricText(safe, {
+      force: Boolean(options && options.forceText),
+    });
     return safe;
   }
 
@@ -2094,17 +2532,184 @@ function initConsolePage() {
     };
   }
 
-  function updateVoiceSystemPromptDisplay(value, options) {
-    const normalized = normalizeVoiceSystemPromptInput(value);
-    const forceInput = Boolean(options && options.forceInput);
-    const keepUserInput =
-      !forceInput &&
-      (state.voiceSystemPromptDirty || state.voiceSystemPromptSaving);
-    state.currentVoiceSystemPromptValue = normalized;
-    if (els.voiceSystemPromptInput && !keepUserInput) {
-      els.voiceSystemPromptInput.value = normalized;
+  function normalizeWorkspaceFileItem(item) {
+    if (!item || typeof item !== "object") {
+      return null;
     }
-    return normalized;
+    const id = String(item.id || "").trim().toLowerCase();
+    const filename = String(item.filename || "").trim();
+    if (!id || !filename) {
+      return null;
+    }
+    const defaultContent = normalizeVoiceSystemPromptInput(item.defaultContent || "");
+    const content = normalizeVoiceSystemPromptInput(
+      item.enabled ? item.content || "" : defaultContent
+    );
+    return {
+      id,
+      filename,
+      label: String(item.label || filename).trim() || filename,
+      description: String(item.description || "").trim(),
+      enabled: item.enabled !== false,
+      customized: Boolean(item.customized),
+      defaultEnabled: item.defaultEnabled !== false,
+      disableAllowed: item.disableAllowed !== false,
+      defaultContent,
+      content,
+    };
+  }
+
+  function getWorkspaceFileBaseValue(file) {
+    if (!file) {
+      return "";
+    }
+    return file.enabled ? file.content : file.defaultContent;
+  }
+
+  function getSelectedWorkspaceFile() {
+    const files = Array.isArray(state.openclawWorkspaceFiles)
+      ? state.openclawWorkspaceFiles
+      : [];
+    const selected =
+      files.find((item) => item.id === state.selectedWorkspaceFileId) || files[0] || null;
+    if (selected && state.selectedWorkspaceFileId !== selected.id) {
+      state.selectedWorkspaceFileId = selected.id;
+    }
+    return selected;
+  }
+
+  function getWorkspaceFileEditorValue(file) {
+    if (!file) {
+      return "";
+    }
+    if (Object.prototype.hasOwnProperty.call(state.workspaceFileDrafts, file.id)) {
+      return state.workspaceFileDrafts[file.id];
+    }
+    return getWorkspaceFileBaseValue(file);
+  }
+
+  function renderWorkspaceFileEditor() {
+    const files = Array.isArray(state.openclawWorkspaceFiles)
+      ? state.openclawWorkspaceFiles
+      : [];
+    if (els.workspaceFileSelect) {
+      els.workspaceFileSelect.replaceChildren();
+      files.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = `${item.label}（${item.filename}）`;
+        els.workspaceFileSelect.appendChild(option);
+      });
+    }
+
+    const selected = getSelectedWorkspaceFile();
+    if (els.workspaceFileSelect) {
+      els.workspaceFileSelect.value = selected ? selected.id : "";
+      els.workspaceFileSelect.disabled = state.workspaceFileSaving || !selected;
+    }
+
+    if (!selected) {
+      if (els.voiceSystemPromptInput) {
+        els.voiceSystemPromptInput.value = "";
+        els.voiceSystemPromptInput.disabled = true;
+      }
+      if (els.voiceSystemPromptSaveBtn) {
+        els.voiceSystemPromptSaveBtn.disabled = true;
+      }
+      if (els.workspaceFileDisableBtn) {
+        els.workspaceFileDisableBtn.disabled = true;
+        els.workspaceFileDisableBtn.textContent = "禁用文件";
+      }
+      if (els.workspaceFileDetail) {
+        els.workspaceFileDetail.textContent = "当前没有可编辑的 xiaoai agent workspace 文件。";
+      }
+      syncCustomPickers();
+      scheduleControlMasonryLayout();
+      return;
+    }
+
+    const editorValue = getWorkspaceFileEditorValue(selected);
+    state.currentVoiceSystemPromptValue = editorValue;
+    if (els.voiceSystemPromptInput) {
+      els.voiceSystemPromptInput.disabled = state.workspaceFileSaving;
+      if (document.activeElement !== els.voiceSystemPromptInput || !state.workspaceFileDirty[selected.id]) {
+        els.voiceSystemPromptInput.value = editorValue;
+      }
+      els.voiceSystemPromptInput.placeholder = `输入要写入 xiaoai agent workspace / ${selected.filename} 的内容`;
+    }
+    if (els.voiceSystemPromptSaveBtn) {
+      els.voiceSystemPromptSaveBtn.disabled = state.workspaceFileSaving;
+      els.voiceSystemPromptSaveBtn.textContent = state.workspaceFileSaving ? "保存中" : "保存";
+    }
+    if (els.workspaceFileDisableBtn) {
+      els.workspaceFileDisableBtn.disabled =
+        state.workspaceFileSaving || !selected.disableAllowed;
+      els.workspaceFileDisableBtn.textContent = selected.disableAllowed
+        ? "禁用文件"
+        : "不可禁用";
+      els.workspaceFileDisableBtn.title = selected.disableAllowed
+        ? ""
+        : `${selected.filename} 是核心提示文件，建议保留。`;
+    }
+    if (els.workspaceFileDetail) {
+      const detailParts = [
+        `当前文件：${selected.filename}`,
+        selected.enabled ? "状态：已启用" : "状态：已禁用",
+        selected.enabled
+          ? selected.customized
+            ? "内容：自定义"
+            : "内容：默认"
+          : selected.id === "boot"
+            ? "禁用后文件会被移除，保存任意内容可重新启用"
+            : "禁用后会清空内容并跳过注入，保存任意内容可重新启用",
+        selected.description || "",
+      ].filter(Boolean);
+      els.workspaceFileDetail.textContent = detailParts.join(" · ");
+    }
+    syncCustomPickers();
+    scheduleControlMasonryLayout();
+  }
+
+  function updateWorkspaceFilesDisplay(data) {
+    const nextState = data && typeof data === "object" ? data : {};
+    const normalizedFiles = Array.isArray(nextState.files)
+      ? nextState.files.map((item) => normalizeWorkspaceFileItem(item)).filter(Boolean)
+      : [];
+    if (!normalizedFiles.length) {
+      const fallbackPrompt = normalizeVoiceSystemPromptInput(
+        state.currentVoiceSystemPromptValue || ""
+      );
+      normalizedFiles.push({
+        id: "agents",
+        filename: "AGENTS.md",
+        label: "系统提示词",
+        description: "这里会直接写入专属 workspace 的 AGENTS.md。",
+        enabled: true,
+        customized: Boolean(fallbackPrompt),
+        defaultEnabled: true,
+        disableAllowed: false,
+        defaultContent: fallbackPrompt,
+        content: fallbackPrompt,
+      });
+    }
+    state.openclawWorkspaceFiles = normalizedFiles;
+    const activeIds = new Set(normalizedFiles.map((item) => item.id));
+    Object.keys(state.workspaceFileDrafts).forEach((id) => {
+      if (!activeIds.has(id)) {
+        delete state.workspaceFileDrafts[id];
+      }
+    });
+    Object.keys(state.workspaceFileDirty).forEach((id) => {
+      if (!activeIds.has(id)) {
+        delete state.workspaceFileDirty[id];
+      }
+    });
+    normalizedFiles.forEach((item) => {
+      if (!state.workspaceFileDirty[item.id]) {
+        state.workspaceFileDrafts[item.id] = getWorkspaceFileBaseValue(item);
+      }
+    });
+    renderWorkspaceFileEditor();
   }
 
   function updateTransitionPhrasesDisplay(value, options) {
@@ -2288,6 +2893,8 @@ function initConsolePage() {
         els.openclawModelDetail.textContent = `专属 agent：${state.openclawAgentId} · 当前配置里还没有读取到可用模型。`;
       }
     }
+    syncCustomPickers();
+    scheduleControlMasonryLayout();
   }
 
   function renderOpenclawModelLoading(message) {
@@ -2303,6 +2910,8 @@ function initConsolePage() {
       els.openclawModelDetail.textContent =
         message || "正在直接读取 OpenClaw 配置中的模型信息…";
     }
+    syncCustomPickers();
+    scheduleControlMasonryLayout();
   }
 
   function renderOpenclawModelLoadFailure(message) {
@@ -2318,6 +2927,8 @@ function initConsolePage() {
       els.openclawModelDetail.textContent =
         message || "读取 OpenClaw 模型配置失败，请稍后重试。";
     }
+    syncCustomPickers();
+    scheduleControlMasonryLayout();
   }
 
   async function refreshOpenclawModelState(silent, options) {
@@ -2351,6 +2962,408 @@ function initConsolePage() {
     }
   }
 
+  function normalizeOpenclawRouteChannelItem(value) {
+    const id =
+      value && typeof value.id === "string" && value.id.trim()
+        ? value.id.trim()
+        : "";
+    if (!id) {
+      return null;
+    }
+    return {
+      id,
+      label:
+        value && typeof value.label === "string" && value.label.trim()
+          ? value.label.trim()
+          : id,
+      configured: !(value && value.configured === false),
+      targets: Array.isArray(value && value.targets)
+        ? value.targets
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+        : [],
+    };
+  }
+
+  function resolveOpenclawRouteDefaultTarget(channelOption, target) {
+    const explicitTarget =
+      typeof target === "string" && target.trim() ? target.trim() : "";
+    if (explicitTarget) {
+      return explicitTarget;
+    }
+    if (channelOption && channelOption.targets.length === 1) {
+      return channelOption.targets[0];
+    }
+    return "";
+  }
+
+  function renderOpenclawRouteControl(route) {
+    const nextRoute = route && typeof route === "object" ? route : {};
+    const serverChannel =
+      typeof nextRoute.channel === "string" && nextRoute.channel.trim()
+        ? nextRoute.channel.trim()
+        : "";
+    const serverTarget =
+      typeof nextRoute.target === "string" && nextRoute.target.trim()
+        ? nextRoute.target.trim()
+        : "";
+    const normalizedChannels = Array.isArray(nextRoute.channels)
+      ? nextRoute.channels
+          .map((item) => normalizeOpenclawRouteChannelItem(item))
+          .filter(Boolean)
+      : [];
+    if (
+      serverChannel &&
+      !normalizedChannels.some((item) => item.id === serverChannel)
+    ) {
+      normalizedChannels.unshift({
+        id: serverChannel,
+        label: serverChannel,
+        configured: false,
+        targets: [],
+      });
+    }
+
+    state.openclawRouteChannels = normalizedChannels;
+    state.openclawRouteEnabled = Boolean(nextRoute.enabled) && Boolean(serverTarget);
+
+    const routeFocused =
+      document.activeElement === els.openclawRouteChannelSelect ||
+      document.activeElement === els.openclawRouteTargetInput;
+    if (!state.openclawRouteDirty || !routeFocused) {
+      state.openclawRouteChannel =
+        serverChannel || (normalizedChannels[0] && normalizedChannels[0].id) || "";
+      state.openclawRouteDirty = false;
+    } else if (!state.openclawRouteChannel && serverChannel) {
+      state.openclawRouteChannel = serverChannel;
+    }
+
+    const currentChannel =
+      state.openclawRouteChannel ||
+      serverChannel ||
+      (normalizedChannels[0] && normalizedChannels[0].id) ||
+      "";
+    const currentChannelOption =
+      normalizedChannels.find((item) => item.id === currentChannel) || null;
+    const resolvedServerTarget = resolveOpenclawRouteDefaultTarget(
+      currentChannelOption,
+      serverTarget
+    );
+    if (!state.openclawRouteDirty || !routeFocused) {
+      state.openclawRouteTarget = resolvedServerTarget;
+    }
+
+    if (els.openclawRouteChannelSelect) {
+      const select = els.openclawRouteChannelSelect;
+      select.replaceChildren();
+      if (!normalizedChannels.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "未检测到已配置渠道";
+        select.appendChild(option);
+      } else {
+        normalizedChannels.forEach((item) => {
+          const option = document.createElement("option");
+          option.value = item.id;
+          option.textContent = item.configured
+            ? item.id
+            : `${item.id}（未在当前配置中检测到）`;
+          select.appendChild(option);
+        });
+      }
+      select.value = currentChannel;
+      if (!currentChannel && select.options.length > 0) {
+        select.selectedIndex = 0;
+      }
+      select.disabled = state.openclawRouteSaving;
+    }
+
+    if (els.openclawRouteTargetInput) {
+      if (!state.openclawRouteDirty || document.activeElement !== els.openclawRouteTargetInput) {
+        els.openclawRouteTargetInput.value =
+          state.openclawRouteTarget || resolvedServerTarget;
+      }
+      els.openclawRouteTargetInput.disabled = state.openclawRouteSaving;
+      const placeholderTargets = currentChannelOption ? currentChannelOption.targets : [];
+      els.openclawRouteTargetInput.placeholder = placeholderTargets.length
+        ? `例如：${placeholderTargets[0]}`
+        : "填写当前渠道对应的目标";
+    }
+
+    if (els.openclawRouteSaveBtn) {
+      els.openclawRouteSaveBtn.disabled =
+        state.openclawRouteSaving || !normalizedChannels.length;
+    }
+    if (els.openclawRouteDisableBtn) {
+      els.openclawRouteDisableBtn.disabled = state.openclawRouteSaving;
+    }
+
+    if (els.openclawRouteDetail) {
+      const detailParts = [
+        `专属 agent：${
+          typeof nextRoute.agentId === "string" && nextRoute.agentId.trim()
+            ? nextRoute.agentId.trim()
+            : state.openclawAgentId || "xiaoai"
+        }`,
+        state.openclawRouteEnabled
+          ? `当前通知：${serverChannel || currentChannel} / ${serverTarget}`
+          : "当前通知：已关闭",
+        currentChannelOption && currentChannelOption.targets.length > 1
+          ? `检测到 ${currentChannelOption.targets.length} 个候选目标`
+          : currentChannelOption && currentChannelOption.targets.length === 1
+            ? "当前渠道可自动推断唯一目标"
+            : "",
+      ].filter(Boolean);
+      els.openclawRouteDetail.textContent = detailParts.join(" · ");
+    }
+    syncCustomPickers();
+    scheduleControlMasonryLayout();
+  }
+
+  function syncAudioTailPaddingAvailability(disabled) {
+    if (!els.audioTailPaddingValue) {
+      return;
+    }
+    const effectiveDisabled =
+      Boolean(disabled) || state.audioCalibrationRunning || state.audioTailPaddingSaving;
+    els.audioTailPaddingValue.setAttribute(
+      "contenteditable",
+      effectiveDisabled ? "false" : "plaintext-only"
+    );
+    els.audioTailPaddingValue.setAttribute("aria-disabled", String(effectiveDisabled));
+    els.audioTailPaddingValue.tabIndex = effectiveDisabled ? -1 : 0;
+    els.audioTailPaddingValue.classList.toggle("is-disabled", effectiveDisabled);
+  }
+
+  function bindAudioTailPaddingEditor() {
+    if (!els.audioTailPaddingValue || els.audioTailPaddingValue.dataset.bound === "true") {
+      return;
+    }
+    els.audioTailPaddingValue.dataset.bound = "true";
+    els.audioTailPaddingValue.addEventListener("focus", () => {
+      state.audioTailPaddingEditing = true;
+      state.audioTailPaddingDirty = false;
+      syncAudioTailPaddingMetricText(state.currentAudioTailPaddingMs, { force: true });
+      window.requestAnimationFrame(() => {
+        if (
+          !els.audioTailPaddingValue ||
+          document.activeElement !== els.audioTailPaddingValue
+        ) {
+          return;
+        }
+        const selection = window.getSelection();
+        if (!selection) {
+          return;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(els.audioTailPaddingValue);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+    });
+    els.audioTailPaddingValue.addEventListener("input", () => {
+      const raw = sanitizeAudioTailPaddingText(els.audioTailPaddingValue.textContent);
+      if ((els.audioTailPaddingValue.textContent || "") !== raw) {
+        els.audioTailPaddingValue.textContent = raw;
+      }
+      state.audioTailPaddingDirty = true;
+      if (!raw || raw.endsWith(".")) {
+        return;
+      }
+      state.currentAudioTailPaddingMs = clamp(
+        Math.round(Number(raw) * 1000),
+        0,
+        MAX_AUDIO_TAIL_PADDING_MS
+      );
+    });
+    els.audioTailPaddingValue.addEventListener("blur", () => {
+      state.audioTailPaddingEditing = false;
+      const raw = sanitizeAudioTailPaddingText(els.audioTailPaddingValue.textContent);
+      if (!raw || raw.endsWith(".")) {
+        state.audioTailPaddingDirty = false;
+        updateAudioTailPaddingDisplay(state.confirmedAudioTailPaddingMs, {
+          forceText: true,
+        });
+        renderAudioCalibrationControl(
+          (state.bootstrap && state.bootstrap.audioCalibration) || {}
+        );
+        return;
+      }
+      state.currentAudioTailPaddingMs = clamp(
+        Math.round(Number(raw) * 1000),
+        0,
+        MAX_AUDIO_TAIL_PADDING_MS
+      );
+      syncAudioTailPaddingMetricText(state.currentAudioTailPaddingMs, { force: true });
+      if (state.audioTailPaddingDirty) {
+        void applyAudioTailPadding();
+      } else {
+        renderAudioCalibrationControl(
+          (state.bootstrap && state.bootstrap.audioCalibration) || {}
+        );
+      }
+    });
+    els.audioTailPaddingValue.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        els.audioTailPaddingValue.blur();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        state.audioTailPaddingEditing = false;
+        state.audioTailPaddingDirty = false;
+        updateAudioTailPaddingDisplay(state.confirmedAudioTailPaddingMs, {
+          forceText: true,
+        });
+        els.audioTailPaddingValue.blur();
+      }
+    });
+  }
+
+  function ensureAudioCalibrationMetricsShell() {
+    if (!els.audioCalibrationMetrics) {
+      return;
+    }
+    if (els.audioCalibrationMetrics.dataset.ready === "true") {
+      return;
+    }
+    els.audioCalibrationMetrics.innerHTML = `
+      <div class="control-metric control-metric-editable">
+        <span class="control-metric-label">空余延迟</span>
+        <strong class="control-metric-value control-metric-value-editable">
+          <span
+            class="control-metric-inline-edit"
+            id="audioTailPaddingValue"
+            role="spinbutton"
+            tabindex="0"
+            spellcheck="false"
+            aria-label="空余延迟，单位秒"
+            aria-valuemin="0"
+            aria-valuemax="${escapeHtml(String(MAX_AUDIO_TAIL_PADDING_MS / 1000))}"
+          ></span>
+          <span class="control-metric-unit">s</span>
+        </strong>
+        <span class="control-metric-note" id="audioTailPaddingNote">尾部保守留白，回车或失焦保存</span>
+      </div>
+      <div class="control-metric">
+        <span class="control-metric-label">起播检测</span>
+        <strong class="control-metric-value" id="audioCalibrationPlaybackDetectValue">-</strong>
+        <span class="control-metric-note">播放开始识别</span>
+      </div>
+      <div class="control-metric">
+        <span class="control-metric-label">停止收敛</span>
+        <strong class="control-metric-value" id="audioCalibrationStopSettleValue">-</strong>
+        <span class="control-metric-note">停止命令生效</span>
+      </div>
+      <div class="control-metric">
+        <span class="control-metric-label">状态探测</span>
+        <strong class="control-metric-value" id="audioCalibrationStatusProbeValue">-</strong>
+        <span class="control-metric-note">状态轮询耗时</span>
+      </div>
+    `;
+    els.audioCalibrationMetrics.dataset.ready = "true";
+    els.audioTailPaddingValue = byId("audioTailPaddingValue");
+    els.audioTailPaddingNote = byId("audioTailPaddingNote");
+    els.audioCalibrationPlaybackDetectValue = byId(
+      "audioCalibrationPlaybackDetectValue"
+    );
+    els.audioCalibrationStopSettleValue = byId("audioCalibrationStopSettleValue");
+    els.audioCalibrationStatusProbeValue = byId("audioCalibrationStatusProbeValue");
+    bindAudioTailPaddingEditor();
+  }
+
+  function renderAudioCalibrationControl(calibration) {
+    ensureAudioCalibrationMetricsShell();
+    const nextCalibration =
+      calibration && typeof calibration === "object" ? calibration : {};
+    const currentProfile =
+      nextCalibration.currentProfile &&
+      typeof nextCalibration.currentProfile === "object"
+        ? nextCalibration.currentProfile
+        : null;
+    const lastRun =
+      nextCalibration.lastRun && typeof nextCalibration.lastRun === "object"
+        ? nextCalibration.lastRun
+        : null;
+    const tailPaddingMs = getFiniteNumber(
+      nextCalibration.tailPaddingMs,
+      state.confirmedAudioTailPaddingMs || DEFAULT_AUDIO_TAIL_PADDING_MS
+    );
+    state.audioCalibrationRunning = Boolean(nextCalibration.running);
+    if (!state.audioTailPaddingEditing || !state.audioTailPaddingDirty) {
+      updateAudioTailPaddingDisplay(tailPaddingMs, {
+        forceText: !state.audioTailPaddingEditing,
+      });
+    }
+
+    if (els.audioCalibrationBtn) {
+      els.audioCalibrationBtn.disabled =
+        state.audioCalibrationRunning ||
+        !(state.bootstrap && state.bootstrap.ready);
+      els.audioCalibrationBtn.textContent = state.audioCalibrationRunning
+        ? "校准中"
+        : "开始静音校准";
+    }
+
+    if (els.audioCalibrationPlaybackDetectValue) {
+      els.audioCalibrationPlaybackDetectValue.textContent = formatLatencyEstimate(
+        currentProfile && currentProfile.playbackDetectEstimateMs
+      );
+    }
+    if (els.audioCalibrationStopSettleValue) {
+      els.audioCalibrationStopSettleValue.textContent = formatLatencyEstimate(
+        currentProfile &&
+          (currentProfile.pauseSettleEstimateMs ||
+            currentProfile.stopSettleEstimateMs)
+      );
+    }
+    if (els.audioCalibrationStatusProbeValue) {
+      els.audioCalibrationStatusProbeValue.textContent = formatLatencyEstimate(
+        currentProfile && currentProfile.statusProbeEstimateMs
+      );
+    }
+    if (els.audioTailPaddingValue) {
+      els.audioTailPaddingValue.setAttribute(
+        "aria-valuenow",
+        String((state.currentAudioTailPaddingMs || 0) / 1000)
+      );
+      els.audioTailPaddingValue.setAttribute("title", "直接修改秒数，回车或失焦保存");
+    }
+    if (els.audioTailPaddingNote) {
+      els.audioTailPaddingNote.textContent = state.audioTailPaddingSaving
+        ? "正在保存..."
+        : "尾部保守留白，回车或失焦保存";
+    }
+
+    if (els.audioCalibrationDetail) {
+      const detailParts = [];
+      if (currentProfile && currentProfile.updatedAt) {
+        detailParts.push(`当前画像更新于 ${formatDateTime(currentProfile.updatedAt)}`);
+      }
+      if (lastRun) {
+        const rounds = getFiniteNumber(lastRun.rounds, 0);
+        const successCount = getFiniteNumber(lastRun.successCount, 0);
+        detailParts.push(
+          `上次校准：${formatDateTime(lastRun.completedAt || lastRun.startedAt || "")}`
+        );
+        detailParts.push(`结果：${successCount}/${rounds || successCount} 成功`);
+        if (lastRun.deviceName || lastRun.deviceId) {
+          detailParts.push(`设备：${lastRun.deviceName || lastRun.deviceId}`);
+        }
+        if (lastRun.lastError) {
+          detailParts.push(`最后错误：${lastRun.lastError}`);
+        }
+      }
+      if (!detailParts.length) {
+        detailParts.push("可随时运行静音校准，结果会写入当前设备的延迟画像。");
+      }
+      els.audioCalibrationDetail.textContent = detailParts.join(" · ");
+    }
+    syncAudioTailPaddingAvailability(!(state.bootstrap && state.bootstrap.ready));
+    scheduleControlMasonryLayout();
+  }
+
   function renderDebugLogToggle(enabled) {
     const nextEnabled = Boolean(enabled);
     state.debugLogEnabled = nextEnabled;
@@ -2361,6 +3374,7 @@ function initConsolePage() {
     if (els.debugLogLabel) {
       els.debugLogLabel.textContent = nextEnabled ? "已开启" : "已关闭";
     }
+    scheduleControlMasonryLayout();
   }
 
   function readVolumeDeviceMuted(volume) {
@@ -2501,6 +3515,10 @@ function initConsolePage() {
     els.modeButtons.forEach((button) => {
       button.disabled = disabled;
     });
+    if (els.audioCalibrationBtn) {
+      els.audioCalibrationBtn.disabled = disabled || state.audioCalibrationRunning;
+    }
+    syncAudioTailPaddingAvailability(disabled);
     if (els.statVolume) {
       els.statVolume.setAttribute(
         "contenteditable",
@@ -2544,7 +3562,7 @@ function initConsolePage() {
     if (!data.ready) {
       return data.loginHint || data.lastError || "当前还没完成登录";
     }
-    if (data.lastError) {
+    if (data.lastError && data.lastErrorTransient !== true) {
       return `已连接，但最近一次异常为：${data.lastError}`;
     }
     return "设备已连接，控制台可以直接使用";
@@ -2710,16 +3728,17 @@ function initConsolePage() {
         state.currentVoiceContextCharsValue
       )
     );
-    updateVoiceSystemPromptDisplay(
+    state.currentVoiceSystemPromptValue =
       typeof data.openclawVoiceSystemPrompt === "string"
         ? data.openclawVoiceSystemPrompt
-        : state.currentVoiceSystemPromptValue
-    );
+        : state.currentVoiceSystemPromptValue;
+    updateWorkspaceFilesDisplay(data.openclawWorkspaceFiles);
     updateTransitionPhrasesDisplay(
       Array.isArray(data.transitionPhrases)
         ? data.transitionPhrases
         : state.currentTransitionPhrasesValue
     );
+    renderOpenclawRouteControl(data.openclawRoute);
     renderThinkingToggle(
       Boolean(
         data && Object.prototype.hasOwnProperty.call(data, "thinkingEnabled")
@@ -2735,6 +3754,7 @@ function initConsolePage() {
           : false
       )
     );
+    renderAudioCalibrationControl(data.audioCalibration);
     renderDebugLogToggle(data.debugLogEnabled !== false);
     setModeSelection(data.mode || "wake");
     renderSpeakerControlState();
@@ -2998,8 +4018,22 @@ function initConsolePage() {
 
   async function refreshBootstrap(silent) {
     try {
+      const preservedControlScrollTop =
+        state.activeTab === "control" && els.controlScreenScroll
+          ? els.controlScreenScroll.scrollTop
+          : null;
+      const preservedControlScrollRevision =
+        state.activeTab === "control" ? state.controlScrollRevision : null;
       const payload = await apiFetch(API.bootstrap);
       renderBootstrap(payload);
+      if (
+        preservedControlScrollTop != null &&
+        preservedControlScrollRevision === state.controlScrollRevision
+      ) {
+        window.requestAnimationFrame(() => {
+          restoreControlScrollTop(preservedControlScrollTop);
+        });
+      }
       return true;
     } catch (error) {
       if (!silent) {
@@ -3600,43 +4634,44 @@ function initConsolePage() {
   }
 
   async function applyVoiceSystemPrompt() {
-    if (state.voiceSystemPromptSaving) {
+    if (state.workspaceFileSaving) {
+      return;
+    }
+    const selected = getSelectedWorkspaceFile();
+    if (!selected) {
+      showToast("当前没有可编辑的 workspace 文件。", "error");
       return;
     }
     const raw = els.voiceSystemPromptInput
       ? normalizeVoiceSystemPromptInput(els.voiceSystemPromptInput.value)
       : "";
     const trimmed = raw.trim();
+    const previous = getWorkspaceFileBaseValue(selected).trim();
     if (
-      !state.voiceSystemPromptDirty &&
-      trimmed === state.currentVoiceSystemPromptValue.trim()
+      !state.workspaceFileDirty[selected.id] &&
+      trimmed === previous
     ) {
-      updateVoiceSystemPromptDisplay(state.currentVoiceSystemPromptValue, {
-        forceInput: true,
-      });
+      renderWorkspaceFileEditor();
       return;
     }
 
-    state.voiceSystemPromptSaving = true;
-    if (els.voiceSystemPromptSaveBtn) {
-      els.voiceSystemPromptSaveBtn.disabled = true;
-      els.voiceSystemPromptSaveBtn.textContent = "保存中";
-    }
+    state.workspaceFileSaving = true;
+    renderWorkspaceFileEditor();
     try {
-      const payload = await postJson(API.voiceSystemPrompt, { prompt: raw });
-      state.voiceSystemPromptDirty = false;
-      updateVoiceSystemPromptDisplay(
-        payload && typeof payload.prompt === "string"
-          ? payload.prompt
-          : trimmed,
-        { forceInput: true }
-      );
+      const payload = await postJson(API.workspaceFile, {
+        file: selected.filename,
+        content: raw,
+        enabled: true,
+      });
+      state.workspaceFileDirty[selected.id] = false;
+      state.workspaceFileDrafts[selected.id] =
+        payload && payload.file
+          ? normalizeVoiceSystemPromptInput(payload.file.content || payload.file.defaultContent || "")
+          : raw;
       showToast(
         payload && payload.message
           ? payload.message
-          : trimmed
-            ? "xiaoai agent workspace 的 AGENTS.md 已保存。"
-            : "xiaoai agent workspace 的 AGENTS.md 已恢复默认内容。",
+          : `xiaoai agent workspace 的 ${selected.filename} 已保存。`,
         "success"
       );
       await refreshBootstrap(true);
@@ -3646,11 +4681,50 @@ function initConsolePage() {
     } catch (error) {
       showToast(error.message || String(error), "error");
     } finally {
-      state.voiceSystemPromptSaving = false;
-      if (els.voiceSystemPromptSaveBtn) {
-        els.voiceSystemPromptSaveBtn.disabled = false;
-        els.voiceSystemPromptSaveBtn.textContent = "保存";
+      state.workspaceFileSaving = false;
+      renderWorkspaceFileEditor();
+    }
+  }
+
+  async function disableSelectedWorkspaceFile() {
+    if (state.workspaceFileSaving) {
+      return;
+    }
+    const selected = getSelectedWorkspaceFile();
+    if (!selected) {
+      showToast("当前没有可禁用的 workspace 文件。", "error");
+      return;
+    }
+    if (!selected.disableAllowed) {
+      showToast(`${selected.filename} 是核心提示文件，当前不支持禁用。`, "error");
+      return;
+    }
+    state.workspaceFileSaving = true;
+    renderWorkspaceFileEditor();
+    try {
+      const payload = await postJson(API.workspaceFile, {
+        file: selected.filename,
+        enabled: false,
+      });
+      state.workspaceFileDirty[selected.id] = false;
+      state.workspaceFileDrafts[selected.id] = normalizeVoiceSystemPromptInput(
+        selected.defaultContent || ""
+      );
+      showToast(
+        payload && payload.message
+          ? payload.message
+          : `已禁用 xiaoai agent workspace 的 ${selected.filename}。`,
+        "success"
+      );
+      await refreshBootstrap(true);
+      if (state.activeTab === "events") {
+        await refreshEvents(true);
       }
+    } catch (error) {
+      showToast(error.message || String(error), "error");
+    } finally {
+      state.workspaceFileSaving = false;
+      renderWorkspaceFileEditor();
     }
   }
 
@@ -3823,6 +4897,74 @@ function initConsolePage() {
     }
   }
 
+  async function applyOpenclawRoute(options) {
+    if (state.openclawRouteSaving) {
+      return;
+    }
+
+    const disableNotification = Boolean(options && options.disableNotification);
+    const channel = els.openclawRouteChannelSelect
+      ? String(els.openclawRouteChannelSelect.value || "").trim()
+      : "";
+    const target = els.openclawRouteTargetInput
+      ? String(els.openclawRouteTargetInput.value || "").trim()
+      : "";
+
+    if (!disableNotification && !channel) {
+      showToast("请先选择一个通知渠道。", "error");
+      return;
+    }
+
+    state.openclawRouteSaving = true;
+    if (els.openclawRouteChannelSelect) {
+      els.openclawRouteChannelSelect.disabled = true;
+    }
+    if (els.openclawRouteTargetInput) {
+      els.openclawRouteTargetInput.disabled = true;
+    }
+    if (els.openclawRouteSaveBtn) {
+      els.openclawRouteSaveBtn.disabled = true;
+    }
+    if (els.openclawRouteDisableBtn) {
+      els.openclawRouteDisableBtn.disabled = true;
+    }
+
+    try {
+      const payload = await postJson(
+        API.openclawRoute,
+        disableNotification
+          ? {
+              channel,
+              disableNotification: true,
+            }
+          : Object.assign(
+              { channel },
+              target ? { target } : {}
+            )
+      );
+      state.openclawRouteDirty = false;
+      renderOpenclawRouteControl(payload && payload.route);
+      showToast(
+        payload && payload.message
+          ? payload.message
+          : disableNotification
+            ? "已关闭插件通知。"
+            : "插件通知渠道已保存。",
+        "success"
+      );
+      await refreshBootstrap(true);
+      if (state.activeTab === "events") {
+        await refreshEvents(true);
+      }
+    } catch (error) {
+      showToast(error.message || String(error), "error");
+      await refreshBootstrap(true);
+    } finally {
+      state.openclawRouteSaving = false;
+      renderOpenclawRouteControl(state.bootstrap && state.bootstrap.openclawRoute);
+    }
+  }
+
   async function applyThinkingEnabled(enabled) {
     if (state.thinkingSaving) {
       return;
@@ -3954,6 +5096,90 @@ function initConsolePage() {
     }
   }
 
+  async function applyAudioCalibration() {
+    if (state.audioCalibrationRunning) {
+      return;
+    }
+    state.audioCalibrationRunning = true;
+    renderAudioCalibrationControl(
+      Object.assign({}, state.bootstrap && state.bootstrap.audioCalibration, {
+        running: true,
+      })
+    );
+    try {
+      const payload = await postJson(API.audioCalibration, {});
+      showToast(
+        payload && payload.message
+          ? payload.message
+          : "静音校准完成。",
+        "success"
+      );
+      await refreshBootstrap(true);
+      if (state.activeTab === "events") {
+        await refreshEvents(true);
+      }
+    } catch (error) {
+      showToast(error.message || String(error), "error");
+      await refreshBootstrap(true);
+    } finally {
+      state.audioCalibrationRunning = false;
+      renderAudioCalibrationControl(
+        (state.bootstrap && state.bootstrap.audioCalibration) || {}
+      );
+    }
+  }
+
+  async function applyAudioTailPadding() {
+    if (state.audioTailPaddingSaving) {
+      return;
+    }
+    const tailPaddingMs = clamp(
+      Math.round(Number(state.currentAudioTailPaddingMs) || 0),
+      0,
+      MAX_AUDIO_TAIL_PADDING_MS
+    );
+    state.audioTailPaddingSaving = true;
+    renderAudioCalibrationControl(
+      Object.assign({}, state.bootstrap && state.bootstrap.audioCalibration, {
+        tailPaddingMs,
+      })
+    );
+    try {
+      const payload = await postJson(API.audioTailPadding, { tailPaddingMs });
+      const nextTailPaddingMs = getFiniteNumber(
+        payload && payload.tailPaddingMs,
+        tailPaddingMs
+      );
+      state.audioTailPaddingDirty = false;
+      updateAudioTailPaddingDisplay(nextTailPaddingMs, { forceText: true });
+      if (state.bootstrap) {
+        state.bootstrap.audioCalibration = Object.assign(
+          {},
+          state.bootstrap.audioCalibration,
+          payload && payload.calibration,
+          { tailPaddingMs: nextTailPaddingMs }
+        );
+      }
+      showToast(
+        payload && payload.message ? payload.message : "空余延迟已更新。",
+        "success"
+      );
+      await refreshBootstrap(true);
+    } catch (error) {
+      state.audioTailPaddingDirty = false;
+      updateAudioTailPaddingDisplay(state.confirmedAudioTailPaddingMs, {
+        forceText: true,
+      });
+      showToast(error.message || String(error), "error");
+      await refreshBootstrap(true);
+    } finally {
+      state.audioTailPaddingSaving = false;
+      renderAudioCalibrationControl(
+        (state.bootstrap && state.bootstrap.audioCalibration) || {}
+      );
+    }
+  }
+
   async function applyMuted(enabled) {
     enqueueSpeakerControlCommand(
       { kind: "mute", value: Boolean(enabled) },
@@ -4005,6 +5231,12 @@ function initConsolePage() {
       } else if (delta < -8 && current > 18) {
         hideComposer();
       }
+    });
+  }
+
+  if (els.controlScreenScroll) {
+    els.controlScreenScroll.addEventListener("scroll", () => {
+      state.controlScrollRevision += 1;
     });
   }
 
@@ -4151,13 +5383,18 @@ function initConsolePage() {
 
   if (els.voiceSystemPromptInput) {
     els.voiceSystemPromptInput.addEventListener("input", () => {
-      state.voiceSystemPromptDirty = true;
+      const selected = getSelectedWorkspaceFile();
+      if (!selected) {
+        return;
+      }
+      state.workspaceFileDirty[selected.id] = true;
       const normalized = normalizeVoiceSystemPromptInput(
         els.voiceSystemPromptInput.value
       );
       if (normalized !== els.voiceSystemPromptInput.value) {
         els.voiceSystemPromptInput.value = normalized;
       }
+      state.workspaceFileDrafts[selected.id] = normalized;
     });
     els.voiceSystemPromptInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -4170,6 +5407,19 @@ function initConsolePage() {
   if (els.voiceSystemPromptSaveBtn) {
     els.voiceSystemPromptSaveBtn.addEventListener("click", () => {
       void applyVoiceSystemPrompt();
+    });
+  }
+
+  if (els.workspaceFileSelect) {
+    els.workspaceFileSelect.addEventListener("change", () => {
+      state.selectedWorkspaceFileId = String(els.workspaceFileSelect.value || "").trim();
+      renderWorkspaceFileEditor();
+    });
+  }
+
+  if (els.workspaceFileDisableBtn) {
+    els.workspaceFileDisableBtn.addEventListener("click", () => {
+      void disableSelectedWorkspaceFile();
     });
   }
 
@@ -4215,9 +5465,64 @@ function initConsolePage() {
     });
   }
 
+  if (els.openclawRouteChannelSelect) {
+    els.openclawRouteChannelSelect.addEventListener("change", () => {
+      state.openclawRouteDirty = true;
+      state.openclawRouteChannel = String(
+        els.openclawRouteChannelSelect.value || ""
+      ).trim();
+      const currentChannel = state.openclawRouteChannels.find(
+        (item) => item.id === state.openclawRouteChannel
+      );
+      if (
+        els.openclawRouteTargetInput &&
+        !String(els.openclawRouteTargetInput.value || "").trim() &&
+        currentChannel &&
+        currentChannel.targets.length === 1
+      ) {
+        state.openclawRouteTarget = currentChannel.targets[0];
+        els.openclawRouteTargetInput.value = currentChannel.targets[0];
+      }
+      renderOpenclawRouteControl(state.bootstrap && state.bootstrap.openclawRoute);
+    });
+  }
+
+  if (els.openclawRouteTargetInput) {
+    els.openclawRouteTargetInput.addEventListener("input", () => {
+      state.openclawRouteDirty = true;
+      state.openclawRouteTarget = String(
+        els.openclawRouteTargetInput.value || ""
+      ).trim();
+    });
+    els.openclawRouteTargetInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void applyOpenclawRoute();
+      }
+    });
+  }
+
+  if (els.openclawRouteSaveBtn) {
+    els.openclawRouteSaveBtn.addEventListener("click", () => {
+      void applyOpenclawRoute();
+    });
+  }
+
+  if (els.openclawRouteDisableBtn) {
+    els.openclawRouteDisableBtn.addEventListener("click", () => {
+      void applyOpenclawRoute({ disableNotification: true });
+    });
+  }
+
   if (els.debugLogToggle) {
     els.debugLogToggle.addEventListener("click", () => {
       void applyDebugLogEnabled(!state.debugLogEnabled);
+    });
+  }
+
+  if (els.audioCalibrationBtn) {
+    els.audioCalibrationBtn.addEventListener("click", () => {
+      void applyAudioCalibration();
     });
   }
 
@@ -4423,6 +5728,8 @@ function initConsolePage() {
   }
 
   bindChatScroll();
+  initCustomPickers();
+  initControlMasonry();
   setComposeMode("chat");
   setDeviceListVisible(false);
   updateVolumeDisplay(0);
@@ -4441,7 +5748,6 @@ function initConsolePage() {
   hydrateAudioPlayers(document);
   autoResizeComposer();
   syncComposerMetrics();
-  installControlMasonryLayout();
   if (els.composerShell && typeof ResizeObserver === "function") {
     const composerResizeObserver = new ResizeObserver(() => {
       syncComposerMetrics();
@@ -4450,6 +5756,7 @@ function initConsolePage() {
   }
   window.addEventListener("resize", syncComposerMetrics);
   window.addEventListener("resize", () => syncLoginWorkspaceFrameHeight());
+  window.addEventListener("resize", scheduleControlMasonryLayout);
   setActiveTab(getStoredConsoleTab(), false);
   refreshAll(false);
   installRefreshTimer();
