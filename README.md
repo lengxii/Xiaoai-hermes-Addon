@@ -23,13 +23,9 @@
 
 ## 快速开始
 
-### 通过 OpenClaw 安装
-
-如果你希望让 OpenClaw 自己完成安装，可以直接把下面这段话发给它。
-展开后可直接使用代码块右上角的复制按钮，复制内容会保留换行。
-
 <details>
-<summary><strong>安装提示词（点击展开并复制）</strong></summary>
+<summary><strong>通过 OpenClaw 安装（推荐）</strong></summary>
+如果你希望让 OpenClaw 自己完成安装，可以把下面这段话直接发给它。
 
 ```text
 请帮我安装 `openclaw-plugin-xiaoai-cloud` 插件。
@@ -67,14 +63,57 @@ https://github.com/ZhengXieGang/Xiaoai-Claw-Addon
 
 </details>
 
+<details>
+<summary><strong>从 Release 手动安装</strong></summary>
+
+macOS / Linux：
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+Windows：
+```bat
+install.cmd
+```
+
+要求：
+- 安装脚本和发布压缩包放在同一目录
+- 脚本必须在真正运行 OpenClaw Gateway 的那台机器 / 容器里执行
+</details>
+
+<details>
+<summary><strong>安装脚本附加参数</strong></summary>
+
+- `--profile <name>`：指定 OpenClaw profile
+- `--state-dir <dir>`：指定 `OPENCLAW_STATE_DIR`
+- `--openclaw-bin <path>`：指定 OpenClaw CLI 路径
+- `--skip-npm-install`：跳过依赖安装
+
+</details>
+<details>
+<summary><strong>从源码安装</strong></summary>
+
+```bash
+cd openclaw-plugin-xiaoai-cloud
+chmod +x install.sh
+./install.sh
+```
+
+Windows：
+```bat
+cd openclaw-plugin-xiaoai-cloud
+install.cmd
+```
+
+</details>
+
+<details>
+<summary><strong>卸载</strong></summary>
+
 ### 通过 OpenClaw 卸载
 
 如果你希望让 OpenClaw 自己完成卸载，可以直接把下面这段话发给它。
-这段提示词会要求它先确认你是否要保留专用 `xiaoai` agent、是否要保留该 agent 的对话记录，再执行对应的卸载脚本。
-展开后可直接使用代码块右上角的复制按钮，复制内容会保留换行。
-
-<details>
-<summary><strong>卸载提示词（点击展开并复制）</strong></summary>
 
 ```text
 请帮我卸载 `openclaw-plugin-xiaoai-cloud` 插件。
@@ -112,26 +151,6 @@ https://github.com/ZhengXieGang/Xiaoai-Claw-Addon
 - 把关键错误日志整理给我，方便我反馈给插件作者
 ```
 
-</details>
-
-### 从 Release 安装
-
-macOS / Linux：
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-Windows：
-```bat
-install.cmd
-```
-
-要求：
-- 安装脚本和发布压缩包放在同一目录
-- 脚本必须在真正运行 OpenClaw Gateway 的那台机器 / 容器里执行
-
-### 卸载
 
 macOS / Linux：
 ```bash
@@ -164,29 +183,10 @@ uninstall.cmd
 ./uninstall.sh --remove-agent --remove-history
 ```
 
-<details>
-<summary><strong>从源码安装</strong></summary>
-
-### 从源码安装
-
-```bash
-cd openclaw-plugin-xiaoai-cloud
-chmod +x install.sh
-./install.sh
-```
-
-Windows：
-```bat
-cd openclaw-plugin-xiaoai-cloud
-install.cmd
-```
-
 </details>
 
 <details>
 <summary><strong>安装脚本会干的事</strong></summary>
-
-## 安装脚本会干的事
 
 1. 安装依赖并构建插件
 2. 安装到 OpenClaw
@@ -199,39 +199,21 @@ install.cmd
 
 </details>
 
-### 安装脚本参数
-
-- `--profile <name>`：指定 OpenClaw profile
-- `--state-dir <dir>`：指定 `OPENCLAW_STATE_DIR`
-- `--openclaw-bin <path>`：指定 OpenClaw CLI 路径
-- `--skip-npm-install`：跳过依赖安装
-
-## 环境要求
+#### 环境要求（安装过程中会自动安装依赖）
 
 - Node.js `>= 22`
 - 可执行的 `openclaw` CLI
 - 建议安装 Python 3 + `requests`
-```bash
-python3 -m pip install requests
-```
+
 
 ## 首次使用
 
 1. 安装完成后让OpenClaw打开小爱控制台，OpenClaw会调用 `xiaoai_console_open`，返回控制台网页链接。
 2. 打开控制台，先登录小米账号
 3. 在概览页选择要接管的音箱
-4. 到控制页设置模式、音量、唤醒词、通知渠道、上下文记忆和必要时的非流式兜底（一般不需要）；如果你遇到“短音频重复播放”“本地和云端时序不一致”这类问题，可以直接运行控制页里的“音频时序校准（静音）”，它会用静音样本为当前音箱写入延迟画像，不会发出实际声音
+4. 到控制页设置模式、音量、唤醒词、通知渠道、上下文记忆和必要时的非流式兜底（一般不需要）
 5. 这些控制页配置除了网页里可以改，也可以直接通过和 OpenClaw 对话修改；复杂项统一由 `xiaoai_update_settings` 处理，包括通知渠道、模型、上下文记忆，以及 `AGENTS.md`、`IDENTITY.md`、`TOOLS.md`、`HEARTBEAT.md`、`BOOT.md`、`MEMORY.md` 这些 workspace 提示文件的编辑或禁用。`AGENTS.md` 作为核心提示文件会保留启用，其余文件会按 OpenClaw 的 workspace 语义启用或禁用
 
-## 本地部署与音频播放
-
-- `xiaoai_speak` 走的是“小爱自己播文本”，不依赖 HTTP 音频地址，所以即使没有公网 IP 也能正常工作。
-- `xiaoai_tts_bridge`、`xiaoai_play_audio`、以及 OpenClaw 返回 `mediaUrl/mediaUrls` 时，走的是“给音箱一个 URL，让音箱自己去拉音频”。
-- 如果你的 OpenClaw 和小爱音箱在同一局域网，通常不需要公网 IP；关键是音箱必须能访问插件生成的 `audio-relay` 地址。
-- 最稳的做法是显式填写 `audioPublicBaseUrl`，例如 `http://192.168.1.10:18798/api/xiaoai-cloud`。这里应该填音箱能直接访问到的地址，不一定和用户手机访问控制台用的 `publicBaseUrl` 一样。
-- 如果不填 `audioPublicBaseUrl`，插件会先尝试 `publicBaseUrl` 和已有 gateway 对外地址；当它们都不存在、只剩 loopback 地址时，插件会自动尝试当前机器的局域网 IP。
-- 如果最终仍然找不到任何可供音箱访问的音频入口，`xiaoai_tts_bridge` 会自动降级成 `xiaoai_speak`，避免出现“看起来调用成功但音箱没声音”。
-- 音频拦截时序现在会结合当前设备的实时延迟画像计算；控制页里的“音频时序校准（静音）”会把最近测得的起播检测、停止收敛、状态探测耗时持久化下来，默认还会额外保留 `1.5s` 尾部安全留白。
 
 ## 用法示例
 
@@ -240,9 +222,8 @@ python3 -m pip install requests
 - 让OpenClaw返回音频
 - 等等
 
-## 控制逻辑
+## 工作模式
 
-工作模式：
 - `唤醒模式`：命中唤醒词，或窗口期内才接管
 - `代理模式`：完全接管所有语音
 - `静默模式`：不接管，只保留主动播报
@@ -263,7 +244,6 @@ python3 -m pip install requests
 - `xiaoai_set_wake_word`
 - `xiaoai_set_dialog_window`
 - `xiaoai_update_settings`
-  统一修改高级设置；既能改通知渠道、模型、thinking、上下文记忆，也能直接编辑或禁用 xiaoai agent workspace 文件
 - `xiaoai_new_session`
 - `xiaoai_get_status`
 
@@ -271,8 +251,6 @@ python3 -m pip install requests
 
 <details>
 <summary><strong>排障</strong></summary>
-
-## 排障
 
 先看插件状态：
 
@@ -294,7 +272,6 @@ openclaw logs --limit 260 --plain | tail -n 260
 3. 如果连续都是同一音频源失败，插件会暂时直接走浏览器兜底，这是为了减少等待时间
 4. 如果是本地部署，优先检查 `audioPublicBaseUrl` 是否填成了音箱可访问的局域网地址；不要把 `127.0.0.1`、`localhost` 或只给浏览器自己能访问的地址发给音箱
 5. 如果是 `xiaoai_tts_bridge`，当找不到可用音频入口时插件会自动降级成 `xiaoai_speak`；这时说明 TTS 音频 relay 没打通，优先检查 gateway 的局域网可达性
-6. 如果是“能播但结尾容易重播一遍”或“不同部署环境时序差别很大”，先运行控制页里的“音频时序校准（静音）”；它会更新当前音箱的延迟画像，并带上 `1.5s` 尾部保守留白
 
 如果你遇到“执行指令循环”：
 
