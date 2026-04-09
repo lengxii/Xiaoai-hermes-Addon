@@ -4385,7 +4385,7 @@ class XiaoaiCloudPlugin {
             `${CONSOLE_COOKIE_NAME}=${encodeURIComponent(this.consoleState?.accessToken || "")}`,
             `Path=${config.authRoutePath}`,
             "HttpOnly",
-            "SameSite=Strict",
+            "SameSite=Lax",
             `Max-Age=${30 * 24 * 60 * 60}`,
         ];
         if (this.isSecureHttpRequest(request, config)) {
@@ -5310,16 +5310,6 @@ class XiaoaiCloudPlugin {
             }
 
             this.setConsoleAccessCookie(response, request, config);
-            if (auth.fromQuery) {
-                const redirectUrl = new URL(requestUrl.toString());
-                redirectUrl.searchParams.delete("access_token");
-                sendRedirect(
-                    response,
-                    `${redirectUrl.pathname}${redirectUrl.search}`
-                );
-                return true;
-            }
-
             sendHtml(
                 response,
                 renderConsolePage({

@@ -1,5 +1,6 @@
 const THEME_STORAGE_KEY = "xiaoai_console_theme";
 const CONSOLE_TAB_STORAGE_KEY = "xiaoai_console_tab";
+const CONSOLE_ACCESS_TOKEN_STORAGE_KEY = "xiaoai_console_access_token";
 const TAB_ORDER = ["overview", "chat", "control", "events"];
 const DEFAULT_DIALOG_WINDOW_SECONDS = 30;
 const MIN_DIALOG_WINDOW_SECONDS = 5;
@@ -111,6 +112,68 @@ function initThemeSystem() {
   }
 }
 
+function readPersistedConsoleAccessToken() {
+  try {
+    const stored = localStorage.getItem(CONSOLE_ACCESS_TOKEN_STORAGE_KEY);
+    if (stored && stored.trim()) {
+      return stored.trim();
+    }
+  } catch (_) {}
+
+  try {
+    const stored = window.sessionStorage.getItem(CONSOLE_ACCESS_TOKEN_STORAGE_KEY);
+    if (stored && stored.trim()) {
+      return stored.trim();
+    }
+  } catch (_) {}
+
+  return "";
+}
+
+function persistConsoleAccessToken(token) {
+  const normalized = typeof token === "string" ? token.trim() : "";
+  if (!normalized) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(CONSOLE_ACCESS_TOKEN_STORAGE_KEY, normalized);
+  } catch (_) {}
+
+  try {
+    window.sessionStorage.setItem(CONSOLE_ACCESS_TOKEN_STORAGE_KEY, normalized);
+  } catch (_) {}
+}
+
+function stripConsoleAccessTokenFromUrl(locationUrl) {
+  let changed = false;
+  if (locationUrl.searchParams.has("access_token")) {
+    locationUrl.searchParams.delete("access_token");
+    changed = true;
+  }
+
+  if (locationUrl.hash) {
+    const hashParams = new URLSearchParams(locationUrl.hash.replace(/^#/, ""));
+    if (hashParams.has("access_token")) {
+      hashParams.delete("access_token");
+      locationUrl.hash = hashParams.toString() ? `#${hashParams.toString()}` : "";
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return;
+  }
+
+  try {
+    window.history.replaceState(
+      window.history.state,
+      document.title,
+      `${locationUrl.pathname}${locationUrl.search}${locationUrl.hash}`
+    );
+  } catch (_) {}
+}
+
 function initAccessPage() {
   const accessTokenInput = byId("accessTokenInput");
   const accessForm = accessTokenInput ? accessTokenInput.form : null;
@@ -121,34 +184,40 @@ function initAccessPage() {
 
   const locationUrl = new URL(window.location.href);
   const hashParams = new URLSearchParams(locationUrl.hash.replace(/^#/, ""));
-  const accessToken =
-    locationUrl.searchParams.get("access_token") ||
-    hashParams.get("access_token") ||
-    (() => {
-      try {
-        return window.sessionStorage.getItem("xiaoai_console_access_token");
-      } catch (_) {
-        return "";
-      }
-    })() ||
-    "";
+  const queryAccessToken = locationUrl.searchParams.get("access_token") || "";
+  const hashAccessToken = hashParams.get("access_token") || "";
+  const storedAccessToken = readPersistedConsoleAccessToken() || "";
+  const accessToken = queryAccessToken || hashAccessToken || storedAccessToken || "";
+  const accessTokenSource = queryAccessToken
+    ? "query"
+    : hashAccessToken
+      ? "hash"
+      : storedAccessToken
+        ? "storage"
+        : "";
 
   if (accessToken) {
     accessTokenInput.value = accessToken;
-    try {
-      window.sessionStorage.setItem("xiaoai_console_access_token", accessToken);
-    } catch (_) {}
+    persistConsoleAccessToken(accessToken);
+  }
+
+  if (accessForm) {
+    accessForm.addEventListener("submit", () => {
+      persistConsoleAccessToken(accessTokenInput.value || "");
+    });
   }
 
   if (accessToken && accessForm) {
-    const autoSubmitKey = `xiaoai_console_access_autosubmit:${locationUrl.pathname}:${accessToken}`;
     let shouldAutoSubmit = true;
-    try {
-      shouldAutoSubmit = window.sessionStorage.getItem(autoSubmitKey) !== "1";
-      if (shouldAutoSubmit) {
-        window.sessionStorage.setItem(autoSubmitKey, "1");
-      }
-    } catch (_) {}
+    if (accessTokenSource === "query" || accessTokenSource === "hash") {
+      const autoSubmitKey = `xiaoai_console_access_autosubmit:${locationUrl.pathname}:${accessToken}`;
+      try {
+        shouldAutoSubmit = window.sessionStorage.getItem(autoSubmitKey) !== "1";
+        if (shouldAutoSubmit) {
+          window.sessionStorage.setItem(autoSubmitKey, "1");
+        }
+      } catch (_) {}
+    }
 
     if (shouldAutoSubmit) {
       window.setTimeout(() => {
@@ -171,23 +240,14 @@ function initConsolePage() {
   const locationUrl = new URL(window.location.href);
   const consoleAccessToken =
     locationUrl.searchParams.get("access_token") ||
-    (() => {
-      try {
-        return window.sessionStorage.getItem("xiaoai_console_access_token");
-      } catch (_) {
-        return "";
-      }
-    })() ||
+    readPersistedConsoleAccessToken() ||
     "";
 
   if (consoleAccessToken) {
-    try {
-      window.sessionStorage.setItem(
-        "xiaoai_console_access_token",
-        consoleAccessToken
-      );
-    } catch (_) {}
+    persistConsoleAccessToken(consoleAccessToken);
   }
+
+  stripConsoleAccessTokenFromUrl(locationUrl);
 
   const API = {
     bootstrap: new URL("./api/bootstrap", window.location.href),
