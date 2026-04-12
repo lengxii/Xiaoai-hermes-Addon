@@ -2976,6 +2976,174 @@ class XiaoaiCloudPlugin {
         return undefined;
     }
 
+    private async runRequestedCalibration(
+        mode: "audio" | "conversation" | "all"
+    ) {
+        const { device } = await this.ensureActionContext();
+        const audioPrompt = this.buildConsoleAudioCalibrationPrompt(device);
+        const conversationPrompt =
+            this.buildConsoleConversationInterceptCalibrationPrompt(device);
+        const audioRequested = mode === "audio" || mode === "all";
+        const conversationRequested =
+            mode === "conversation" || mode === "all";
+        const runAudio =
+            audioRequested ||
+            (!audioRequested &&
+                conversationRequested &&
+                Boolean(audioPrompt));
+        const runConversation =
+            conversationRequested ||
+            (!conversationRequested &&
+                audioRequested &&
+                Boolean(conversationPrompt));
+        const busyParts: string[] = [];
+        if (runAudio && this.audioCalibrationRunning) {
+            busyParts.push("音频时序校准");
+        }
+        if (
+            runConversation &&
+            this.conversationInterceptCalibrationRunning
+        ) {
+            busyParts.push("对话拦截校准");
+        }
+        let audio:
+            | PersistedAudioCalibrationSummary
+            | undefined;
+        let conversation:
+            | PersistedConversationInterceptCalibrationSummary
+            | undefined;
+        let audioError: string | undefined;
+        let conversationError: string | undefined;
+
+        if (busyParts.length === 0) {
+            if (runAudio) {
+                try {
+                    audio = await this.runSpeakerAudioCalibration();
+                } catch (error) {
+                    audioError =
+                        this.errorMessage(error) || "音频时序校准失败。";
+                }
+            }
+            if (runConversation) {
+                try {
+                    conversation =
+                        await this.runConversationInterceptCalibration();
+                } catch (error) {
+                    conversationError =
+                        this.errorMessage(error) || "对话拦截校准失败。";
+                }
+            }
+        }
+
+        return {
+            requestedMode: mode,
+            deviceId: device.minaDeviceId,
+            deviceName: device.name,
+            runAudio,
+            runConversation,
+            autoIncludedAudio: runAudio && !audioRequested,
+            autoIncludedConversation:
+                runConversation && !conversationRequested,
+            busyMessage:
+                busyParts.length > 0
+                    ? `${busyParts.join("和")}正在进行中，请稍后再试。`
+                    : undefined,
+            audio,
+            conversation,
+            audioError,
+            conversationError,
+        };
+    }
+
+    private buildCalibrationOutcomeMessage(
+        result: Awaited<ReturnType<XiaoaiCloudPlugin["runRequestedCalibration"]>>
+    ) {
+        const completed: string[] = [];
+        const failed: string[] = [];
+        if (result.audio) {
+            completed.push(
+                result.autoIncludedAudio
+                    ? "音频时序校准（已补跑）"
+                    : "音频时序校准"
+            );
+        } else if (result.runAudio && result.audioError) {
+            failed.push(`音频时序校准失败：${result.audioError}`);
+        }
+        if (result.conversation) {
+            completed.push(
+                result.autoIncludedConversation
+                    ? "对话拦截校准（已补跑）"
+                    : "对话拦截校准"
+            );
+        } else if (result.runConversation && result.conversationError) {
+            failed.push(`对话拦截校准失败：${result.conversationError}`);
+        }
+        const parts: string[] = [];
+        if (completed.length > 0) {
+            parts.push(`${completed.join("、")}已完成`);
+        }
+        if (failed.length > 0) {
+            parts.push(failed.join("；"));
+        }
+        return {
+            ok: completed.length > 0 && failed.length === 0,
+            message:
+                parts.length > 0
+                    ? `${parts.join("；")}。`
+                    : "没有执行任何校准。",
+        };
+    }
+
+    private buildAudioCalibrationCompletionText(
+        calibration: PersistedAudioCalibrationSummary,
+        label = "音频时序校准"
+    ) {
+        const successCount = readNumber(calibration.successCount) || 0;
+        const rounds = readNumber(calibration.rounds) || 0;
+        const tailPaddingMs = readNumber(calibration.tailPaddingMs);
+        return (
+            `${label}完成。\n` +
+            `成功轮次: ${successCount}/${rounds || successCount}\n` +
+            (typeof tailPaddingMs === "number"
+                ? `当前空余延迟: ${tailPaddingMs}ms\n`
+                : "") +
+            (calibration.lastError
+                ? `最后错误: ${calibration.lastError}`
+                : "没有新的异常。")
+        );
+    }
+
+    private buildConversationCalibrationCompletionText(
+        calibration: PersistedConversationInterceptCalibrationSummary,
+        label = "对话拦截校准"
+    ) {
+        const successCount = readNumber(calibration.successCount) || 0;
+        const rounds = readNumber(calibration.rounds) || 0;
+        const strategy =
+            readString(calibration.strategy) ||
+            this.classifyConversationInterceptCalibrationStrategy(
+                calibration
+            );
+        const pollIntervalMs = readNumber(calibration.pollIntervalMs);
+        const recommendedPollIntervalMs = readNumber(
+            calibration.recommendedPollIntervalMs
+        );
+        return (
+            `${label}完成。\n` +
+            `成功轮次: ${successCount}/${rounds || successCount}\n` +
+            (strategy ? `校准策略: ${strategy}\n` : "") +
+            (typeof pollIntervalMs === "number"
+                ? `当前轮询间隔: ${pollIntervalMs}ms\n`
+                : "") +
+            (typeof recommendedPollIntervalMs === "number"
+                ? `建议轮询间隔: ${recommendedPollIntervalMs}ms\n`
+                : "") +
+            (calibration.lastError
+                ? `最后错误: ${calibration.lastError}`
+                : "没有新的异常。")
+        );
+    }
+
     private serializeConversationInterceptLatencyProfilesForPersistence() {
         const entries = Array.from(this.conversationInterceptLatencyProfiles.entries())
             .map(([deviceId, profile]) => {
@@ -5325,43 +5493,46 @@ class XiaoaiCloudPlugin {
                 return true;
             }
             if (requestMethod === "POST" && action === "device/audio-calibration") {
-                if (this.audioCalibrationRunning) {
+                const calibration = await this.runRequestedCalibration("audio");
+                if (calibration.busyMessage) {
                     sendJson(response, 409, {
-                        error: "静音校准正在进行中，请稍后再试。",
+                        error: calibration.busyMessage,
                     });
                     return true;
                 }
-                const calibration = await this.runSpeakerAudioCalibration();
-                const successCount = readNumber(calibration.successCount) || 0;
-                const rounds = readNumber(calibration.rounds) || 0;
-                sendJson(response, 200, {
-                    ok: true,
-                    message:
-                        successCount === rounds
-                            ? `静音校准完成，共 ${rounds} 轮全部成功。`
-                            : `静音校准完成，成功 ${successCount}/${rounds} 轮。`,
-                    calibration,
-                });
+                const outcome = this.buildCalibrationOutcomeMessage(calibration);
+                sendJson(response, outcome.ok ? 200 : 500, outcome.ok
+                    ? {
+                        ok: true,
+                        message: outcome.message,
+                        calibration,
+                    }
+                    : {
+                        error: outcome.message,
+                        calibration,
+                    });
                 return true;
             }
             if (requestMethod === "POST" && action === "device/conversation-intercept-calibration") {
-                if (this.conversationInterceptCalibrationRunning) {
+                const calibration =
+                    await this.runRequestedCalibration("conversation");
+                if (calibration.busyMessage) {
                     sendJson(response, 409, {
-                        error: "对话拦截校准正在进行中，请稍后再试。",
+                        error: calibration.busyMessage,
                     });
                     return true;
                 }
-                const calibration = await this.runConversationInterceptCalibration();
-                const successCount = readNumber(calibration.successCount) || 0;
-                const rounds = readNumber(calibration.rounds) || 0;
-                sendJson(response, 200, {
-                    ok: true,
-                    message:
-                        successCount === rounds
-                            ? `对话拦截校准完成，共 ${rounds} 轮全部成功。`
-                            : `对话拦截校准完成，成功 ${successCount}/${rounds} 轮。`,
-                    calibration,
-                });
+                const outcome = this.buildCalibrationOutcomeMessage(calibration);
+                sendJson(response, outcome.ok ? 200 : 500, outcome.ok
+                    ? {
+                        ok: true,
+                        message: outcome.message,
+                        calibration,
+                    }
+                    : {
+                        error: outcome.message,
+                        calibration,
+                    });
                 return true;
             }
             if (requestMethod === "POST" && action === "device/audio-tail-padding") {
@@ -15514,90 +15685,68 @@ class XiaoaiCloudPlugin {
         this.api.registerTool({
             name: "xiaoai_run_calibration",
             description:
-                "运行小爱插件的延迟校准。mode=audio 为音频时序校准；mode=conversation 为对话拦截校准，会发送无副作用测试问句，测试期间音箱可能真实出声。",
+                "运行小爱插件的延迟校准。mode=all 会顺序完成音频时序校准和对话拦截校准；请求单项时，如果当前设备另一项仍未校准，也会自动补跑。对话校准会发送无副作用测试问句，测试期间音箱可能真实出声。",
             parameters: schemaObject({
                 mode: schemaString({
-                    description: "校准类型。audio=音频时序校准；conversation=对话拦截校准。",
-                    enum: ["audio", "conversation"],
+                    description: "校准类型。all=顺序完成音频和对话校准；audio=音频时序校准；conversation=对话拦截校准。",
+                    enum: ["all", "audio", "conversation"],
                 }),
             }),
             execute: async (_id: string, params: { mode: string }) => {
-                const mode = params.mode === "conversation" ? "conversation" : "audio";
-                const label =
-                    mode === "conversation" ? "对话拦截校准" : "音频时序校准";
+                const mode =
+                    params.mode === "conversation"
+                        ? "conversation"
+                        : params.mode === "audio"
+                            ? "audio"
+                            : "all";
                 try {
-                    if (mode === "conversation") {
-                        if (this.conversationInterceptCalibrationRunning) {
-                            return {
-                                content: [{
-                                    type: "text",
-                                    text: "[SYSTEM]对话拦截校准正在进行中，请稍后再试。",
-                                }],
-                            };
-                        }
-                        const calibration = await this.runConversationInterceptCalibration();
-                        const successCount = readNumber(calibration.successCount) || 0;
-                        const rounds = readNumber(calibration.rounds) || 0;
-                        const strategy =
-                            readString(calibration.strategy) ||
-                            this.classifyConversationInterceptCalibrationStrategy(
-                                calibration
-                            );
-                        const pollIntervalMs = readNumber(calibration.pollIntervalMs);
-                        const recommendedPollIntervalMs = readNumber(
-                            calibration.recommendedPollIntervalMs
+                    const calibration = await this.runRequestedCalibration(mode);
+                    if (calibration.busyMessage) {
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `[SYSTEM]${calibration.busyMessage}`,
+                            }],
+                        };
+                    }
+                    const outcome = this.buildCalibrationOutcomeMessage(calibration);
+                    const detailBlocks: string[] = [];
+                    if (calibration.audio) {
+                        detailBlocks.push(
+                            this.buildAudioCalibrationCompletionText(
+                                calibration.audio,
+                                calibration.autoIncludedAudio
+                                    ? "音频时序校准（自动补跑）"
+                                    : "音频时序校准"
+                            )
                         );
-                        return {
-                            content: [{
-                                type: "text",
-                                text:
-                                    `[SYSTEM]${label}完成。\n` +
-                                    `成功轮次: ${successCount}/${rounds || successCount}\n` +
-                                    (strategy ? `校准策略: ${strategy}\n` : "") +
-                                    (typeof pollIntervalMs === "number"
-                                        ? `当前轮询间隔: ${pollIntervalMs}ms\n`
-                                        : "") +
-                                    (typeof recommendedPollIntervalMs === "number"
-                                        ? `建议轮询间隔: ${recommendedPollIntervalMs}ms\n`
-                                        : "") +
-                                    (calibration.lastError
-                                        ? `最后错误: ${calibration.lastError}`
-                                        : "没有新的异常。"),
-                            }],
-                        };
                     }
-
-                    if (this.audioCalibrationRunning) {
-                        return {
-                            content: [{
-                                type: "text",
-                                text: "[SYSTEM]音频时序校准正在进行中，请稍后再试。",
-                            }],
-                        };
+                    if (calibration.conversation) {
+                        detailBlocks.push(
+                            this.buildConversationCalibrationCompletionText(
+                                calibration.conversation,
+                                calibration.autoIncludedConversation
+                                    ? "对话拦截校准（自动补跑）"
+                                    : "对话拦截校准"
+                            )
+                        );
                     }
-                    const calibration = await this.runSpeakerAudioCalibration();
-                    const successCount = readNumber(calibration.successCount) || 0;
-                    const rounds = readNumber(calibration.rounds) || 0;
-                    const tailPaddingMs = readNumber(calibration.tailPaddingMs);
                     return {
                         content: [{
                             type: "text",
-                            text:
-                                `[SYSTEM]${label}完成。\n` +
-                                `成功轮次: ${successCount}/${rounds || successCount}\n` +
-                                (typeof tailPaddingMs === "number"
-                                    ? `当前空余延迟: ${tailPaddingMs}ms\n`
-                                    : "") +
-                                (calibration.lastError
-                                    ? `最后错误: ${calibration.lastError}`
-                                    : "没有新的异常。"),
+                            text: [
+                                `[SYSTEM]${outcome.message}`,
+                                ...detailBlocks,
+                            ]
+                                .filter(Boolean)
+                                .join("\n\n"),
                         }],
                     };
                 } catch (error) {
                     return {
                         content: [{
                             type: "text",
-                            text: `[SYSTEM]${label}失败: ${this.errorMessage(error)}`,
+                            text: `[SYSTEM]校准失败: ${this.errorMessage(error)}`,
                         }],
                     };
                 }
