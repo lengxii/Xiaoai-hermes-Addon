@@ -3157,20 +3157,20 @@ body::after,
 }
 
 body[data-page="console"] .page-shell {
-  padding-top: calc(8px + env(safe-area-inset-top));
-  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  padding-top: calc(8px + var(--console-safe-top));
+  padding-bottom: calc(8px + var(--console-safe-bottom));
 }
 
 body[data-page="console"] .console-shell-tabs {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px);
+  min-height: calc(100vh - var(--console-safe-top) - var(--console-safe-bottom) - 16px);
 }
 
 .console-topbar {
-  position: sticky;
-  top: calc(6px + env(safe-area-inset-top));
+  position: relative;
+  top: auto;
   z-index: 20;
   padding: 6px;
 }
@@ -3927,7 +3927,7 @@ body[data-page="console"] .console-shell-tabs {
   }
 
   .console-topbar {
-    top: calc(4px + env(safe-area-inset-top));
+    top: auto;
   }
 
   .console-tab {
@@ -4009,8 +4009,19 @@ body[data-page="console"] .console-shell-tabs {
   }
 
   .mode-btn {
-    min-height: 72px;
-    padding: 10px;
+    min-height: 80px;
+    padding: 10px 8px;
+  }
+
+  .mode-btn strong {
+    font-size: 13px;
+    line-height: 1.2;
+  }
+
+  .mode-btn span {
+    font-size: 11px;
+    line-height: 1.32;
+    min-height: 2.64em;
   }
 
   .chat-scroll {
@@ -5272,7 +5283,7 @@ body {
     min-height: 100dvh;
     overflow: hidden;
     box-sizing: border-box;
-    padding-top: calc(8px + env(safe-area-inset-top));
+    padding-top: calc(8px + var(--console-safe-top));
     padding-right: 8px;
     padding-bottom: 0;
     padding-left: 8px;
@@ -5366,7 +5377,15 @@ body {
 }
 
 body[data-page="console"] {
+  --console-safe-top: 0px;
+  --console-safe-bottom: env(safe-area-inset-bottom, 0px);
   overflow: hidden;
+}
+
+@media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
+  body[data-page="console"] {
+    --console-safe-top: env(safe-area-inset-top, 0px);
+  }
 }
 
 body[data-page="console"] .page-shell {
@@ -6210,8 +6229,8 @@ body[data-page="portal-embedded"] .portal-simple-head h1 {
 /* ====== 移动端顶栏回归顶部 ====== */
 @media (max-width: 768px) {
   .console-shell-tabs .console-topbar {
-    position: sticky;
-    top: calc(4px + env(safe-area-inset-top));
+    position: relative;
+    top: auto;
     bottom: auto;
     left: auto;
     right: auto;
@@ -6845,9 +6864,19 @@ body[data-page="console"] .mode-btn,
 body[data-page="console"] .mode-btn strong,
 body[data-page="console"] .mode-btn span {
   white-space: normal;
-  text-wrap: balance;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  text-wrap: pretty;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+body[data-page="console"] .mode-btn strong {
+  display: block;
+}
+
+body[data-page="console"] .mode-btn span {
+  display: block;
+  min-height: 2.8em;
+  line-height: 1.35;
 }
 
 @media (min-width: 961px) {
