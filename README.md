@@ -241,6 +241,7 @@ uninstall.cmd
 - `xiaoai_console_open`
 - `xiaoai_speak`
 - `xiaoai_play_audio`
+  传 `url` 即可；既支持 `http/https` 音频链接，也支持 OpenClaw 机器上的本地绝对路径（含 `file://`）。
 - `xiaoai_execute`
 - `xiaoai_set_volume`
 - `xiaoai_get_volume`
@@ -251,6 +252,14 @@ uninstall.cmd
 - `xiaoai_update_settings`
 - `xiaoai_new_session`
 - `xiaoai_get_status`
+
+### OpenClaw 工具选择约束（建议保持默认）
+
+1. 普通文字回答：调用 `xiaoai_speak`
+2. 播放音频 URL / 本地文件：调用 `xiaoai_play_audio(url=...)`
+3. 明确要求走 TTS 音频链路排查：调用 `xiaoai_tts_bridge`
+4. 不要用“直接返回 `mediaUrl/mediaUrls`”代替 `xiaoai_play_audio`
+5. 即使误把音频 URL / 本地音频路径写进 `xiaoai_speak(text)`，插件也会自动改走 `xiaoai_play_audio`；若播放失败再回退文本播报
 
 </details>
 
@@ -269,14 +278,18 @@ openclaw logs --limit 260 --plain | tail -n 260
 重点看：
 - `xiaomi-network.log`
 - 控制台 `事件` 页
+  注：`conversation` 高频轮询的 `mi_request_start/end` 已做采样，错误仍会完整记录，便于保留音频故障链路
 
 如果你遇到“音频没播出来”：
 
-1. 先确认返回的是可直接访问的 `http/https` URL
+1. 先确认输入源合法：要么是可直接访问的 `http/https` URL，要么是 OpenClaw 机器上的本地绝对路径（含 `file://`）
 2. 再看控制台事件里是 `speaker` 还是 `browser-fallback`
 3. 如果连续都是同一音频源失败，插件会暂时直接走浏览器兜底，这是为了减少等待时间
 4. 如果是本地部署，优先检查 `audioPublicBaseUrl` 是否填成了音箱可访问的局域网地址；不要把 `127.0.0.1`、`localhost` 或只给浏览器自己能访问的地址发给音箱
 5. 如果是 `xiaoai_tts_bridge`，当找不到可用音频入口时插件会自动降级成 `xiaoai_speak`；这时说明 TTS 音频 relay 没打通，优先检查 gateway 的局域网可达性
+6. 网络会影响稳定性，但先看证据链：如果同一轮里同时出现 `audio_relay_hit` + `audio_playback_started`，且接口返回 `pending=false`，一般说明“当前网络不是主因”
+7. 如果只有 `audio_relay_hit` 没有 `audio_playback_started`，优先排查设备侧起播/状态回读，而不是先判定为网络断流
+8. 复现时建议同一音频连续重放两次：一次可能偶发，连续成功或连续失败更能说明问题归因
 
 如果你遇到“执行指令循环”：
 

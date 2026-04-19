@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from "crypto";
 import { execFile } from "child_process";
 import { appendFile, mkdir, readFile, stat, writeFile } from "fs/promises";
+import { request as httpsRequest } from "https";
 import path from "path";
 import { defaultPluginStorageDir } from "./openclaw-paths.js";
 
@@ -31,10 +32,28 @@ interface XiaomiVerificationDetails {
     identitySession?: string;
 }
 
+interface XiaomiResponseLike {
+    status: number;
+    ok: boolean;
+    url: string;
+    text(): Promise<string>;
+}
+
+interface XiaomiNestedErrorDetail {
+    name?: string;
+    code?: string;
+    message?: string;
+    address?: string;
+    family?: number;
+}
+
 const DEBUG_LOG_MAX_BYTES = 768 * 1024;
 const DEBUG_LOG_KEEP_BYTES = 384 * 1024;
 const DEBUG_LOG_PRUNE_INTERVAL_MS = 60_000;
 const XIAOMI_FETCH_TIMEOUT_MS = 12_000;
+const XIAOMI_GOAWAY_RETRY_DELAYS_MS = [550, 1100, 1800];
+const MINA_HTTP1_FALLBACK_WINDOW_MS = 30 * 60 * 1000;
+const MINA_CONVERSATION_TRACE_SAMPLE_MS = 5_000;
 
 interface PythonCommandCandidate {
     command: string;
@@ -412,6 +431,17 @@ function safeUrlHostname(value: string): string | undefined {
     }
 }
 
+function isMinaNetworkHost(hostname: string | undefined) {
+    if (!hostname) {
+        return false;
+    }
+    return hostname === "userprofile.mina.mi.com" || hostname.endsWith(".mina.mi.com");
+}
+
+function shouldPreferIpv4ForHttp1Host(hostname: string | undefined) {
+    return hostname === "userprofile.mina.mi.com";
+}
+
 function sanitizeText(text: string): string {
     const trimmed = truncateText(text, TRACE_TEXT_LIMIT);
     try {
@@ -490,6 +520,14 @@ function buildCookieHeader(cookies: Record<string, string | number | boolean | u
         .filter(([, value]) => value !== undefined && value !== null && value !== "")
         .map(([key, value]) => `${key}=${String(value)}`)
         .join("; ");
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+    const record: Record<string, string> = {};
+    for (const [key, value] of headers.entries()) {
+        record[key] = value;
+    }
+    return record;
 }
 
 function stripJsonPrefix(text: string): string {
@@ -763,27 +801,95 @@ function isAuthErrorPayload(payload: any): boolean {
     return code === 3 || code === 401 || message.includes("auth") || message.includes("token") || message.includes("login failed");
 }
 
+function summarizeNestedError(error: unknown): XiaomiNestedErrorDetail | undefined {
+    const asAny = error as any;
+    const name = firstNonEmptyText(asAny?.name);
+    const code = firstNonEmptyText(asAny?.code);
+    const message = firstNonEmptyText(asAny?.message);
+    const address = firstNonEmptyText(asAny?.address);
+    const family =
+        typeof asAny?.family === "number" && Number.isFinite(asAny.family)
+            ? asAny.family
+            : undefined;
+
+    if (!name && !code && !message && !address && family === undefined) {
+        return undefined;
+    }
+
+    return {
+        name,
+        code,
+        message,
+        address,
+        family,
+    };
+}
+
+function collectNestedErrors(error: unknown, seen = new Set<any>()) {
+    const asAny = error as any;
+    if (!asAny || typeof asAny !== "object" || seen.has(asAny)) {
+        return [] as XiaomiNestedErrorDetail[];
+    }
+    seen.add(asAny);
+
+    const results: XiaomiNestedErrorDetail[] = [];
+    const nestedErrors = Array.isArray(asAny?.errors) ? asAny.errors : [];
+    for (const nestedError of nestedErrors) {
+        const summary = summarizeNestedError(nestedError);
+        if (summary) {
+            results.push(summary);
+        }
+        results.push(...collectNestedErrors(nestedError, seen));
+    }
+    return results;
+}
+
 function errorDetails(error: unknown) {
     const asAny = error as any;
     const cause = asAny?.cause;
+    const nestedErrors = collectNestedErrors(error);
     return {
         name: asAny?.name,
+        code: asAny?.code,
         message: asAny?.message || String(error),
         causeName: cause?.name,
         causeCode: cause?.code,
         causeMessage: cause?.message,
+        errors: nestedErrors.length ? nestedErrors : undefined,
     };
+}
+
+function isHttp2GoawayError(error: unknown) {
+    const details = errorDetails(error);
+    const text = `${details.message || ""} ${details.causeMessage || ""}`.toLowerCase();
+    return (
+        details.causeCode === "UND_ERR_SOCKET" &&
+        text.includes("goaway")
+    );
 }
 
 function formatNetworkError(error: unknown, target: string) {
     const details = errorDetails(error);
+    const nestedErrors = details.errors?.map((item) =>
+        [
+            item.code,
+            item.name && item.name !== item.code ? item.name : undefined,
+            item.family !== undefined ? `family=${item.family}` : undefined,
+            item.address ? `address=${item.address}` : undefined,
+            item.message,
+        ]
+            .filter(Boolean)
+            .join(" ")
+    );
     const parts = [
         `访问 ${target} 失败`,
         details.message,
+        details.code ? `code=${details.code}` : undefined,
         details.causeCode ? `cause=${details.causeCode}` : undefined,
         details.causeMessage && details.causeMessage !== details.message
             ? details.causeMessage
             : undefined,
+        nestedErrors?.length ? `errors=${nestedErrors.join(" ; ")}` : undefined,
     ].filter(Boolean);
     return parts.join(" | ");
 }
@@ -820,6 +926,8 @@ export class XiaomiAccountClient {
     private pythonRuntimeStatus?: XiaomiPythonRuntimeStatus;
     private debugLogEnabled: boolean;
     private lastDebugLogPruneAt = 0;
+    private minaHttp1FallbackUntil = 0;
+    private lastMinaConversationTraceAt = 0;
 
     constructor(options: {
         username: string;
@@ -845,6 +953,119 @@ export class XiaomiAccountClient {
 
     setDebugLogEnabled(enabled: boolean) {
         this.debugLogEnabled = Boolean(enabled);
+    }
+
+    private isMinaHttp1FallbackActive(nowMs = Date.now()) {
+        return this.minaHttp1FallbackUntil > nowMs;
+    }
+
+    private isHighFrequencyMinaConversationRequest(
+        sid: XiaomiSid,
+        url: string
+    ) {
+        return sid === "micoapi" && url.startsWith(MINA_CONVERSATION_URL);
+    }
+
+    private shouldTraceMinaConversationRequest(
+        sid: XiaomiSid,
+        url: string
+    ) {
+        if (!this.isHighFrequencyMinaConversationRequest(sid, url)) {
+            return true;
+        }
+        const nowMs = Date.now();
+        if (nowMs - this.lastMinaConversationTraceAt < MINA_CONVERSATION_TRACE_SAMPLE_MS) {
+            return false;
+        }
+        this.lastMinaConversationTraceAt = nowMs;
+        return true;
+    }
+
+    private async requestViaHttp1(options: {
+        url: string;
+        method: "GET" | "POST";
+        headers: Headers;
+        body?: URLSearchParams;
+        timeoutMs?: number;
+    }): Promise<XiaomiResponseLike> {
+        const target = new URL(options.url);
+        const headerRecord = headersToRecord(options.headers);
+        const bodyText = options.body?.toString();
+        const preferIpv4 = shouldPreferIpv4ForHttp1Host(target.hostname.toLowerCase());
+        const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+            ? Math.max(1_000, Math.round(Number(options.timeoutMs)))
+            : XIAOMI_FETCH_TIMEOUT_MS;
+
+        if (bodyText && !headerRecord["content-length"]) {
+            headerRecord["content-length"] = String(Buffer.byteLength(bodyText));
+        }
+
+        return new Promise((resolve, reject) => {
+            const request = httpsRequest(
+                {
+                    protocol: target.protocol,
+                    hostname: target.hostname,
+                    port: target.port ? Number(target.port) : undefined,
+                    path: `${target.pathname}${target.search}`,
+                    method: options.method,
+                    headers: headerRecord,
+                    family: preferIpv4 ? 4 : undefined,
+                },
+                (response) => {
+                    const chunks: Buffer[] = [];
+                    response.on("data", (chunk) => {
+                        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                    });
+                    response.on("end", () => {
+                        const textPayload = Buffer.concat(chunks).toString("utf8");
+                        const status = Number(response.statusCode || 0);
+                        resolve({
+                            status,
+                            ok: status >= 200 && status < 300,
+                            url: options.url,
+                            text: async () => textPayload,
+                        });
+                    });
+                }
+            );
+            request.setTimeout(timeoutMs);
+            request.on("timeout", () => {
+                const timeoutError = new Error(
+                    `request timeout after ${timeoutMs}ms`
+                ) as NodeJS.ErrnoException;
+                timeoutError.code = "ETIMEDOUT";
+                request.destroy(timeoutError);
+            });
+            request.on("error", (error) => {
+                reject(error);
+            });
+            if (bodyText) {
+                request.write(bodyText);
+            }
+            request.end();
+        });
+    }
+
+    private async armMinaHttp1Fallback(
+        context: {
+            url: string;
+            host?: string;
+            attempt?: number;
+            error?: unknown;
+        }
+    ) {
+        const nowMs = Date.now();
+        const wasActive = this.isMinaHttp1FallbackActive(nowMs);
+        this.minaHttp1FallbackUntil = Math.max(
+            this.minaHttp1FallbackUntil,
+            nowMs + MINA_HTTP1_FALLBACK_WINDOW_MS
+        );
+        await this.trace("transport_mina_http1_fallback", {
+            ...context,
+            wasActive,
+            fallbackUntil: new Date(this.minaHttp1FallbackUntil).toISOString(),
+            error: context.error ? errorDetails(context.error) : undefined,
+        });
     }
 
     async maintainDebugLog(force = false) {
@@ -2628,8 +2849,16 @@ export class XiaomiAccountClient {
         cookies?: Record<string, string>;
         rawText?: boolean;
         allowRelogin?: boolean;
+        timeoutMs?: number;
+        maxAttempts?: number;
     }): Promise<T> {
         const allowRelogin = options.allowRelogin !== false;
+        const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+            ? Math.max(1_000, Math.round(Number(options.timeoutMs)))
+            : XIAOMI_FETCH_TIMEOUT_MS;
+        const maxAttempts = Number.isFinite(Number(options.maxAttempts))
+            ? Math.min(3, Math.max(1, Math.round(Number(options.maxAttempts))))
+            : 3;
         await this.ensureSid(options.sid);
         if (!this.token?.userId || !this.token[options.sid]) {
             throw new Error(`Xiaomi sid ${options.sid} is not authenticated.`);
@@ -2652,10 +2881,11 @@ export class XiaomiAccountClient {
         const data = typeof options.data === "function" ? options.data(this.token, requestCookies) : options.data;
         const method = options.method || (data ? "POST" : "GET");
         const headers = new Headers(options.headers || {});
+        const hasExplicitProtocolHint = headers.has("X-XIAOMI-PROTOCAL-FLAG-CLI");
         if (!headers.has("User-Agent")) {
             headers.set("User-Agent", buildAccountUserAgent(this.token.deviceId));
         }
-        if (!headers.has("X-XIAOMI-PROTOCAL-FLAG-CLI")) {
+        if (!hasExplicitProtocolHint) {
             headers.set("X-XIAOMI-PROTOCAL-FLAG-CLI", "PROTOCAL-HTTP2");
         }
         if (!headers.has("Content-Type")) {
@@ -2674,55 +2904,127 @@ export class XiaomiAccountClient {
                 headers.set("Content-Type", "application/x-www-form-urlencoded");
             }
         }
+        const requestHost = safeUrlHostname(url);
+        const minaHost = isMinaNetworkHost(requestHost);
+        const forceHttp1ForConversationHost =
+            requestHost === "userprofile.mina.mi.com";
+        const minaHttp1FallbackEligibleHost = forceHttp1ForConversationHost;
+        const traceMinaConversationRequest = this.shouldTraceMinaConversationRequest(
+            options.sid,
+            url
+        );
 
-        await this.trace("mi_request_start", {
-            sid: options.sid,
-            method,
-            url,
-            data,
-            cookies: requestCookies,
-            headers: Object.fromEntries(headers.entries()),
-        });
-        let response: Response;
+        if (traceMinaConversationRequest) {
+            await this.trace("mi_request_start", {
+                sid: options.sid,
+                method,
+                url,
+                requestHost,
+                minaHost,
+                forceHttp1ForConversationHost,
+                minaHttp1FallbackActive:
+                    forceHttp1ForConversationHost ||
+                    (minaHttp1FallbackEligibleHost && this.isMinaHttp1FallbackActive()),
+                timeoutMs,
+                maxAttempts,
+                data,
+                cookies: requestCookies,
+                headers: Object.fromEntries(headers.entries()),
+            });
+        }
+        let response: XiaomiResponseLike | undefined;
         let fetchError: unknown;
-        for (let attempt = 1; attempt <= 3; attempt += 1) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const fallbackActive =
+                forceHttp1ForConversationHost ||
+                (minaHttp1FallbackEligibleHost && this.isMinaHttp1FallbackActive());
+            const currentProtocolHint =
+                headers.get("X-XIAOMI-PROTOCAL-FLAG-CLI") || "PROTOCAL-HTTP2";
+            if (fallbackActive) {
+                if (!hasExplicitProtocolHint || /http2/i.test(currentProtocolHint)) {
+                    headers.set("X-XIAOMI-PROTOCAL-FLAG-CLI", "PROTOCAL-HTTP1");
+                }
+            } else if (!hasExplicitProtocolHint) {
+                headers.set("X-XIAOMI-PROTOCAL-FLAG-CLI", "PROTOCAL-HTTP2");
+            }
+
             try {
-                response = await fetch(url, {
-                    method,
-                    headers,
-                    body,
-                    signal: buildTimeoutSignal()
-                });
+                if (fallbackActive) {
+                    response = await this.requestViaHttp1({
+                        url,
+                        method,
+                        headers,
+                        body,
+                        timeoutMs,
+                    });
+                } else {
+                    response = await fetch(url, {
+                        method,
+                        headers,
+                        body,
+                        signal: buildTimeoutSignal(timeoutMs),
+                    });
+                }
                 fetchError = undefined;
                 break;
             } catch (error) {
                 fetchError = error;
+                const goawayError = isHttp2GoawayError(error);
+                if (goawayError && minaHttp1FallbackEligibleHost) {
+                    await this.armMinaHttp1Fallback({
+                        url,
+                        host: requestHost,
+                        attempt,
+                        error,
+                    });
+                }
+                const retryDelayMs =
+                    goawayError
+                        ? XIAOMI_GOAWAY_RETRY_DELAYS_MS[
+                              Math.min(attempt - 1, XIAOMI_GOAWAY_RETRY_DELAYS_MS.length - 1)
+                          ]
+                        : 200 * attempt;
                 await this.trace("mi_request_fetch_error", {
                     sid: options.sid,
                     method,
                     url,
                     attempt,
                     error: errorDetails(error),
+                    goawayError,
+                    retryDelayMs,
+                    requestHost,
+                    minaHost,
+                    forceHttp1ForConversationHost,
+                    minaHttp1FallbackActive:
+                        forceHttp1ForConversationHost ||
+                        (minaHttp1FallbackEligibleHost &&
+                            this.isMinaHttp1FallbackActive()),
+                    timeoutMs,
+                    maxAttempts,
+                    protocolHint:
+                        headers.get("X-XIAOMI-PROTOCAL-FLAG-CLI") || undefined,
                 });
-                if (attempt < 3) {
-                    await sleep(200 * attempt);
+                if (attempt < maxAttempts) {
+                    await sleep(retryDelayMs);
                     continue;
                 }
             }
         }
-        if (fetchError || !response!) {
+        if (fetchError || !response) {
             throw new Error(formatNetworkError(fetchError, url));
         }
 
         const text = await response.text();
-        await this.trace("mi_request_end", {
-            sid: options.sid,
-            method,
-            url,
-            status: response.status,
-            responseUrl: response.url,
-            body: sanitizeText(text),
-        });
+        if (traceMinaConversationRequest) {
+            await this.trace("mi_request_end", {
+                sid: options.sid,
+                method,
+                url,
+                status: response.status,
+                responseUrl: response.url,
+                body: sanitizeText(text),
+            });
+        }
         if (!response.ok && (response.status === 401 || response.status === 403)) {
             if (allowRelogin) {
                 await this.trace("mi_request_relogin", {
@@ -2780,7 +3082,11 @@ export class MiNAClient {
         uri: string,
         data?: Record<string, any>,
         method?: "GET" | "POST",
-        cookies?: Record<string, string>
+        cookies?: Record<string, string>,
+        options?: {
+            timeoutMs?: number;
+            maxAttempts?: number;
+        }
     ): Promise<T> {
         const requestId = `app_ios_${randomString(30)}`;
         const actualMethod = method || (data ? "POST" : "GET");
@@ -2793,7 +3099,9 @@ export class MiNAClient {
             url: finalUrl,
             method: actualMethod,
             data: actualMethod === "POST" ? actualData : undefined,
-            cookies
+            cookies,
+            timeoutMs: options?.timeoutMs,
+            maxAttempts: options?.maxAttempts,
         });
     }
 
@@ -2829,32 +3137,37 @@ export class MiNAClient {
         });
     }
 
-    async playerPause(deviceId: string) {
+    async playerPause(deviceId: string, options?: { media?: string }) {
         return this.ubusRequest(deviceId, "player_play_operation", "mediaplayer", {
             action: "pause",
-            media: "app_ios"
+            media: options?.media || "app_ios"
         });
     }
 
-    async playerPlay(deviceId: string) {
+    async playerPlay(deviceId: string, options?: { media?: string }) {
         return this.ubusRequest(deviceId, "player_play_operation", "mediaplayer", {
             action: "play",
-            media: "app_ios"
+            media: options?.media || "app_ios"
         });
     }
 
-    async playerStop(deviceId: string) {
+    async playerStop(deviceId: string, options?: { media?: string }) {
         return this.ubusRequest(deviceId, "player_play_operation", "mediaplayer", {
             action: "stop",
-            media: "app_ios"
+            media: options?.media || "app_ios"
         });
     }
 
-    async playerPlayUrl(deviceId: string, url: string, type = 1) {
+    async playerPlayUrl(
+        deviceId: string,
+        url: string,
+        type = 1,
+        options?: { media?: string }
+    ) {
         return this.ubusRequest(deviceId, "player_play_url", "mediaplayer", {
             url,
             type,
-            media: "app_ios"
+            media: options?.media || "app_ios"
         });
     }
 
@@ -2862,13 +3175,40 @@ export class MiNAClient {
         return this.ubusRequest(deviceId, "player_play_music", "mediaplayer", data);
     }
 
-    async playerGetStatus(deviceId: string, options?: { media?: string | null }) {
+    async searchMusic(query: string, count = 6) {
+        return this.request("/music/search", {
+            query,
+            queryType: 1,
+            offset: 0,
+            count,
+            timestamp: Math.floor(Date.now() * 1000),
+        }, "GET");
+    }
+
+    async playerGetStatus(
+        deviceId: string,
+        options?: { media?: string | null; timeoutMs?: number; maxAttempts?: number }
+    ) {
         const message: Record<string, any> = {};
         const media = typeof options?.media === "string" ? options.media.trim() : "";
         if (media) {
             message.media = media;
         }
-        return this.ubusRequest(deviceId, "player_get_play_status", "mediaplayer", message);
+        return this.request(
+            "/remote/ubus",
+            {
+                deviceId,
+                path: "mediaplayer",
+                method: "player_get_play_status",
+                message: JSON.stringify(message),
+            },
+            "POST",
+            undefined,
+            {
+                timeoutMs: options?.timeoutMs,
+                maxAttempts: options?.maxAttempts,
+            }
+        );
     }
 
     async fetchConversation(hardware: string, deviceId: string, limit = 3): Promise<any> {

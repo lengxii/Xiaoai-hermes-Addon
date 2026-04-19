@@ -25,6 +25,7 @@ export interface PersistedCloudProfile {
     audioTailPaddingMs?: number;
     conversationPollIntervalMs?: number;
     speakerAudioLatencyProfiles?: Record<string, PersistedSpeakerAudioLatencyProfile>;
+    audioPlaybackDeviceProfiles?: Record<string, PersistedAudioPlaybackDeviceProfile>;
     lastAudioCalibration?: PersistedAudioCalibrationSummary;
     conversationInterceptLatencyProfiles?: Record<
         string,
@@ -40,6 +41,21 @@ export interface PersistedSpeakerAudioLatencyProfile {
     pauseSettleEstimateMs?: number;
     stopSettleEstimateMs?: number;
     playbackDetectEstimateMs?: number;
+    manualOffsetMs?: number;
+    updatedAtMs?: number;
+}
+
+export interface PersistedAudioPlaybackOutcomeStats {
+    successCount?: number;
+    failureCount?: number;
+    lastSuccessAtMs?: number;
+    lastFailureAtMs?: number;
+}
+
+export interface PersistedAudioPlaybackDeviceProfile {
+    preferredStrategy?: string;
+    strategyStats?: Record<string, PersistedAudioPlaybackOutcomeStats>;
+    directTypeStats?: Record<string, PersistedAudioPlaybackOutcomeStats>;
     updatedAtMs?: number;
 }
 
@@ -50,6 +66,7 @@ export interface PersistedAudioCalibrationSummary {
     successCount?: number;
     failureCount?: number;
     tailPaddingMs?: number;
+    manualOffsetMs?: number;
     startedAt?: string;
     completedAt?: string;
     lastError?: string;

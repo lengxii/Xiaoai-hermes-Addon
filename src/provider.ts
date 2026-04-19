@@ -393,6 +393,18 @@ interface AudioRelayEntry {
     tailPaddingMs?: number;
     lastHitAtMs?: number;
     lastHitAddress?: string;
+    lastServeTraceKey?: string;
+}
+
+interface AudioRelaySharedUsage {
+    hitCount: number;
+    lastHitAtMs?: number;
+    lastHitAddress?: string;
+}
+
+interface ParsedAudioRelayReference {
+    relayId: string;
+    extension: string;
 }
 
 type AudioPlaybackStrategy =
@@ -405,6 +417,7 @@ type AudioPlaybackStrategy =
 
 interface PreparedSpeakerAudioSource {
     playbackUrl: string;
+    playbackUrlCandidates?: string[];
     standardized: boolean;
     standardizationError?: string;
 }
@@ -424,6 +437,7 @@ interface AudioPlaybackCapabilityEntry {
 
 interface ExternalAudioMusicRequest {
     expectedAudioId: string;
+    audioType?: string;
     data: Record<string, any>;
 }
 
@@ -443,14 +457,20 @@ interface SpeakerPlaybackVerifyOptions {
     relayUrl?: string;
     relayHitCount?: number;
     allowRelayHitStart?: boolean;
+    acceptQueuedStart?: boolean;
 }
 
 interface SpeakerPlaybackVerifyResult {
     started: boolean;
     snapshot: SpeakerPlaybackSnapshot | null;
+    rawSnapshot?: SpeakerPlaybackSnapshot | null;
     relayHitObserved: boolean;
     relayHitCount?: number;
     startedByRelayHit?: boolean;
+    startedByRelayHitReason?: string;
+    bootstrapObserved?: boolean;
+    bootstrapReason?: string;
+    placeholderObserved?: boolean;
 }
 
 interface ExternalAudioLoopGuard {
@@ -462,6 +482,7 @@ interface ExternalAudioLoopGuard {
     title?: string;
     armedAtMs: number;
     deadlineAtMs?: number;
+    pendingStartupDeadlineAtMs?: number;
     deadlineHandling?: boolean;
     deadlineTimer?: NodeJS.Timeout;
     lastSnapshot?: SpeakerPlaybackSnapshot | null;
@@ -548,8 +569,11 @@ const MAX_OPENCLAW_VOICE_SYSTEM_PROMPT_CHARS = 6000;
 const MAX_TRANSITION_PHRASES = 12;
 const MAX_TRANSITION_PHRASE_CHARS = 40;
 const OPENCLAW_AGENT_PROMPT_FILENAME = "AGENTS.md";
-const DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT =
+const LEGACY_XIAOAI_AGENT_WORKSPACE_PROMPT =
     "你正在通过真实小爱音箱实时语音对话。目标是尽快开口回答。默认先直接调用 xiaoai_speak，回答尽量简短；如果你已经拿到了可直接播放的音频 URL，也可以按 OpenClaw 官方 payload 格式直接返回 mediaUrl/mediaUrls，插件会自动交给小爱播放。除非确实需要别的工具，否则不要先输出文字。不要输出执行状态、工具回执或流程确认，只给用户真正需要听到的内容。";
+const LEGACY_XIAOAI_TOOLS_WORKSPACE_RULE = "只使用 xiaoai_* 工具处理音箱相关任务。";
+const DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT =
+    "你正在通过真实小爱音箱实时语音对话。目标是先正确调用工具，再尽快开口。工具规则：普通文本回答调用 xiaoai_speak；用户要求播放音频、给出音频 URL 或本地文件路径（含 file://）时，必须调用 xiaoai_play_audio 并把来源写到 url 参数；只有在用户明确要求走 TTS 音频链路或排查 TTS 时才调用 xiaoai_tts_bridge。除非 xiaoai_play_audio 调用失败且无法恢复，否则不要直接返回 mediaUrl/mediaUrls 代替工具调用。不要输出工具回执、执行状态或流程确认，只说用户真正需要听到的内容。";
 const OPENCLAW_WORKSPACE_FILE_DEFINITIONS: Array<{
     id: OpenclawWorkspaceFileId;
     filename: string;
@@ -583,7 +607,8 @@ const OPENCLAW_WORKSPACE_FILE_DEFINITIONS: Array<{
         filename: "TOOLS.md",
         label: "工具约束",
         description: "约束这个专属 agent 在 workspace 里优先使用哪些工具。",
-        defaultContent: "只使用 xiaoai_* 工具处理音箱相关任务。",
+        defaultContent:
+            "音箱相关任务只使用 xiaoai_* 工具。播放 URL 或本地音频文件时统一调用 xiaoai_play_audio(url=...)；不要直接返回 mediaUrl/mediaUrls 代替工具调用。",
         defaultEnabled: true,
         disableAllowed: true,
     },
@@ -619,6 +644,9 @@ const CLOUD_LOGIN_SIDS: XiaomiSid[] = ["xiaomiio", "micoapi"];
 const PAUSE_RETRY_DELAYS_MS = [0, 120];
 const SPEAKER_COMMAND_VERIFY_DELAYS_MS = [80, 160, 320, 600, 900];
 const SPEAKER_COMMAND_FAST_VERIFY_DELAYS_MS = [40, 80, 140];
+const SPEAKER_CONTROL_MEDIA_CANDIDATES = ["common", "app_ios"] as const;
+const SPEAKER_PLAY_URL_MEDIA_CANDIDATES = ["app_ios", "common"] as const;
+const SPEAKER_STATUS_MEDIA_FALLBACK_CANDIDATES = ["app_ios", "common"] as const;
 const SPEAKER_MUTE_READBACK_VERIFY_DELAYS_MS = [120, 360, 900];
 const SOFT_VOLUME_MUTE_READBACK_MAX_PERCENT = 5;
 const SOFT_VOLUME_UNMUTE_SETTLE_PROBE_DELAYS_MS = [1500, 3500, 6500];
@@ -629,11 +657,11 @@ const CONSOLE_FETCH_LIMIT = 50;
 const CONSOLE_JSON_BODY_LIMIT_BYTES = 64 * 1024;
 const HELPER_STATUS_CACHE_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 320;
-const MIN_POLL_INTERVAL_MS = 80;
+const MIN_POLL_INTERVAL_MS = 200;
 const MAX_POLL_INTERVAL_MS = 10_000;
-const MIN_RECOMMENDED_POLL_INTERVAL_MS = 120;
+const MIN_RECOMMENDED_POLL_INTERVAL_MS = 200;
 const IDLE_POLL_INTERVAL_MS = 900;
-const FAST_POLL_INTERVAL_MS = 80;
+const FAST_POLL_INTERVAL_MS = 200;
 const FAST_POLL_WINDOW_MS = 15_000;
 const POLL_ACTIVITY_GRACE_MS = 20_000;
 const STARTUP_POLL_GRACE_MS = 20_000;
@@ -649,10 +677,19 @@ const OPENCLAW_AGENT_SUBMIT_TIMEOUT_MS = 15_000;
 const OPENCLAW_AGENT_WAIT_TIMEOUT_MS = 620_000;
 const AUDIO_RELAY_TTL_MS = 10 * 60 * 1000;
 const MAX_AUDIO_RELAY_ENTRIES = 24;
+const INTERNAL_AUDIO_RELAY_SCHEME = "xiaoai-relay";
 const TTS_BRIDGE_CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_TTS_BRIDGE_CACHE_FILES = 32;
 const TTS_BRIDGE_CACHE_FORMAT_VERSION = "v3";
-const AUDIO_PLAYBACK_VERIFY_DELAYS_MS = [100, 220, 420, 750];
+const AUDIO_PLAYBACK_VERIFY_DELAYS_MS = [80, 180, 320];
+const AUDIO_PLAYBACK_BOOTSTRAP_VERIFY_DELAYS_MS = [420, 700];
+const AUDIO_PLAYBACK_FIRST_RELAY_HIT_GRACE_DELAYS_MS = [420, 700];
+const AUDIO_PLAYBACK_FAST_STATUS_TIMEOUT_MS = 1200;
+const AUDIO_PLAYBACK_FAST_STATUS_MAX_ATTEMPTS = 1;
+const AUDIO_SOURCE_PREFLIGHT_TIMEOUT_MS = 4500;
+const AUDIO_RELAY_RANGE0_FULL_RESPONSE_COMPAT =
+    readBoolean(process.env.XIAOAI_CLOUD_AUDIO_RELAY_RANGE0_FULL_RESPONSE) ===
+    true;
 const AUDIO_RELAY_MAX_BYTES = 24 * 1024 * 1024;
 const DEFAULT_AUDIO_RELAY_TAIL_SILENCE_MS = 1500;
 const MIN_AUDIO_RELAY_TAIL_SILENCE_MS = 0;
@@ -710,11 +747,32 @@ const EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_GRACE_MS = 300;
 const EXTERNAL_AUDIO_LOOP_GUARD_SNAPSHOT_FRESH_MS = 900;
 const EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_STATUS_TIMEOUT_MS = 60;
 const STATIC_ASSET_CACHE_MAX_AGE_SECONDS = 300;
+const EXTERNAL_AUDIO_DEFAULT_ID = "1582971365183456177";
 const EXTERNAL_AUDIO_CP_ID = "355454500";
 const EXTERNAL_AUDIO_ORIGIN = "xiaowei";
+const EXTERNAL_AUDIO_STATIC_PLAY_TYPE = 2;
+const EXTERNAL_AUDIO_PENDING_STARTUP_TIMEOUT_MS = 90_000;
+const EXTERNAL_AUDIO_EMPTY_TYPE_HARDWARE = new Set([
+    "LX04",
+    "LX05",
+    "L05B",
+    "L05C",
+    "L06",
+    "L06A",
+    "X08A",
+    "X10A",
+    "X08C",
+    "X08E",
+    "X8F",
+    "X4B",
+    "OH2",
+    "OH2P",
+    "X6A",
+]);
 const MP3_TRANSCODE_PREFERRED_EXTENSIONS = new Set([".flac", ".ape"]);
 const MP3_TRANSCODE_OPTIONAL_EXTENSIONS = new Set([".wav", ".ogg", ".oga", ".opus"]);
 const FFPROBE_CACHE_TTL_MS = 10 * 60 * 1000;
+const sharedAudioRelayUsage = new Map<string, AudioRelaySharedUsage>();
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT_DIR = path.resolve(MODULE_DIR, "..", "..");
 const STATIC_ASSETS_DIR = path.join(PLUGIN_ROOT_DIR, "assets");
@@ -1040,6 +1098,37 @@ function sendAssetBuffer(
     response.end(payload);
 }
 
+function buildAudioRelayWeakEtag(
+    relayId: string,
+    size: number,
+    modifiedAtMs: number
+) {
+    return `W/"${relayId}-${Math.max(0, size).toString(16)}-${Math.max(0, Math.floor(modifiedAtMs)).toString(16)}"`;
+}
+
+function applyAudioRelayHeaders(
+    response: any,
+    contentType: string,
+    options?: {
+        acceptRanges?: "bytes" | "none";
+        vary?: string;
+        etag?: string;
+        modifiedAtMs?: number;
+    }
+) {
+    response.setHeader("Cache-Control", "public, max-age=300, no-transform");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("Content-Type", contentType);
+    response.setHeader("Accept-Ranges", options?.acceptRanges || "bytes");
+    response.setHeader("Vary", options?.vary || "Range, Accept");
+    if (options?.etag) {
+        response.setHeader("ETag", options.etag);
+    }
+    if (typeof options?.modifiedAtMs === "number" && options.modifiedAtMs > 0) {
+        response.setHeader("Last-Modified", new Date(options.modifiedAtMs).toUTCString());
+    }
+}
+
 function normalizeRoutePath(value: string) {
     const trimmed = value.trim();
     if (!trimmed || trimmed === "/") {
@@ -1207,6 +1296,99 @@ function sortConsoleBaseUrls(values: string[]) {
         }))
         .sort((left, right) => right.score - left.score || left.index - right.index)
         .map((item) => item.value);
+}
+
+function isEphemeralPublicGatewayHostname(hostname: string) {
+    const normalized = hostname.trim().toLowerCase();
+    if (!normalized) {
+        return false;
+    }
+    return /(?:^|\.)(?:sslip\.io|nip\.io|xip\.io|localtest\.me)$/i.test(normalized);
+}
+
+function scoreAudioRelayBaseUrl(
+    value: string,
+    options?: {
+        explicitAudio?: boolean;
+        explicitPublic?: boolean;
+        observed?: boolean;
+        relaySuccess?: boolean;
+        lanHint?: boolean;
+    }
+) {
+    try {
+        const parsed = new URL(value);
+        const hostname = parsed.hostname.trim().toLowerCase();
+        if (!hostname) {
+            return -1_000_000;
+        }
+
+        let score = 0;
+        if (options?.relaySuccess) {
+            score += 9_000;
+        }
+        if (options?.explicitAudio) {
+            score += 6_000;
+        } else if (options?.explicitPublic) {
+            score += 5_200;
+        }
+        if (options?.observed) {
+            score += 2_500;
+        }
+        if (options?.lanHint) {
+            score += 1_500;
+        }
+
+        if (isLoopbackHostname(hostname)) {
+            score -= 10_000;
+        }
+
+        if (parsed.protocol === "https:") {
+            score += 260;
+        } else if (parsed.protocol === "http:") {
+            score += 140;
+        }
+
+        if (looksLikeIpHostname(hostname)) {
+            score += isPrivateHostname(hostname) ? 260 : 80;
+        } else {
+            score += 320;
+        }
+
+        if (!isLoopbackHostname(hostname) && !isPrivateHostname(hostname)) {
+            score += 120;
+        }
+
+        if (parsed.protocol === "https:" && looksLikeIpHostname(hostname)) {
+            score -= 700;
+        }
+
+        if (
+            parsed.protocol === "http:" &&
+            looksLikeIpHostname(hostname) &&
+            !isPrivateHostname(hostname)
+        ) {
+            score -= 260;
+        }
+
+        if (isEphemeralPublicGatewayHostname(hostname)) {
+            score -= options?.relaySuccess
+                ? 40
+                : options?.explicitAudio || options?.explicitPublic
+                  ? 260
+                  : 180;
+        }
+
+        if (!parsed.port || parsed.port === "80" || parsed.port === "443") {
+            score += 40;
+        } else {
+            score -= 30;
+        }
+
+        return score;
+    } catch {
+        return -1_000_000;
+    }
 }
 
 function isVirtualNetworkInterfaceName(name: string) {
@@ -1442,6 +1624,40 @@ function normalizeOpenclawVoiceSystemPrompt(
         return normalized;
     }
     return fallbackToDefault ? DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT : "";
+}
+
+function looksLikeLegacyXiaoaiAgentWorkspacePrompt(value: any) {
+    const normalized = normalizeOpenclawVoiceSystemPrompt(value, {
+        fallbackToDefault: false,
+    });
+    if (!normalized) {
+        return false;
+    }
+    const normalizedLegacyDefault = normalizeOpenclawVoiceSystemPrompt(
+        LEGACY_XIAOAI_AGENT_WORKSPACE_PROMPT,
+        { fallbackToDefault: false }
+    );
+    if (normalized === normalizedLegacyDefault) {
+        return true;
+    }
+    const hasLegacyMarkers =
+        normalized.includes("默认先直接调用 xiaoai_speak") &&
+        normalized.includes("直接返回 mediaUrl/mediaUrls");
+    const hasNewMarkers =
+        normalized.includes("必须调用 xiaoai_play_audio") ||
+        normalized.includes("不要直接返回 mediaUrl/mediaUrls 代替工具调用");
+    return hasLegacyMarkers && !hasNewMarkers;
+}
+
+function looksLikeLegacyXiaoaiToolsWorkspaceRule(value: any) {
+    const normalized = readString(value) || "";
+    if (!normalized) {
+        return false;
+    }
+    return (
+        normalized.includes(LEGACY_XIAOAI_TOOLS_WORKSPACE_RULE) &&
+        !normalized.includes("xiaoai_play_audio(url=...)")
+    );
 }
 
 function findOpenclawWorkspaceFileDefinition(fileRef: any) {
@@ -2024,6 +2240,100 @@ function normalizeRemoteMediaUrl(value: string | undefined) {
     }
 }
 
+function normalizeLocalMediaPath(value: string | undefined) {
+    const raw = readString(value);
+    if (!raw) {
+        return undefined;
+    }
+
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol === "file:") {
+            const normalized = fileURLToPath(parsed);
+            return readString(normalized) || undefined;
+        }
+    } catch {
+        // Treat as plain path and continue below.
+    }
+
+    if (path.isAbsolute(raw) || path.win32.isAbsolute(raw)) {
+        return raw;
+    }
+    return undefined;
+}
+
+function normalizeAudioPlaybackInput(value: string | undefined) {
+    return normalizeRemoteMediaUrl(value) || normalizeLocalMediaPath(value);
+}
+
+const EMBEDDED_AUDIO_INPUT_PATTERN = /(https?:\/\/[^\s"'<>`]+|file:\/\/[^\s"'<>`]+)/giu;
+const EMBEDDED_AUDIO_LOCAL_PATH_PATTERN =
+    /(?:^|[\s"'“”‘’])((?:\/|[A-Za-z]:\\)[^\s"'“”‘’]+?\.(?:mp3|wav|flac|m4a|aac|ogg|opus|amr|wma|webm|mp4|mkv|ts|m3u8))(?=$|[\s"'“”‘’])/giu;
+const EMBEDDED_AUDIO_TRAILING_PUNCTUATION_RE = /[)\]},.;!?，。；！？”’]+$/u;
+
+function trimEmbeddedAudioToken(value: string | undefined) {
+    const raw = readString(value);
+    if (!raw) {
+        return undefined;
+    }
+    const cleaned = raw.replace(EMBEDDED_AUDIO_TRAILING_PUNCTUATION_RE, "").trim();
+    return cleaned || undefined;
+}
+
+function extractAudioPlaybackInputFromText(text: string | undefined): {
+    input: string;
+    matchedToken: string;
+} | null {
+    const raw = readString(text);
+    if (!raw) {
+        return null;
+    }
+
+    const direct = normalizeAudioPlaybackInput(raw);
+    if (direct) {
+        return { input: direct, matchedToken: raw };
+    }
+
+    EMBEDDED_AUDIO_INPUT_PATTERN.lastIndex = 0;
+    for (const match of raw.matchAll(EMBEDDED_AUDIO_INPUT_PATTERN)) {
+        const token = trimEmbeddedAudioToken(match[1]);
+        const normalized = normalizeAudioPlaybackInput(token);
+        if (normalized) {
+            return { input: normalized, matchedToken: token || match[1] };
+        }
+    }
+
+    EMBEDDED_AUDIO_LOCAL_PATH_PATTERN.lastIndex = 0;
+    for (const match of raw.matchAll(EMBEDDED_AUDIO_LOCAL_PATH_PATTERN)) {
+        const token = trimEmbeddedAudioToken(match[1]);
+        const normalized = normalizeAudioPlaybackInput(token);
+        if (normalized) {
+            return { input: normalized, matchedToken: token || match[1] };
+        }
+    }
+
+    return null;
+}
+
+function buildAudioRedirectTitle(
+    rawText: string | undefined,
+    matchedToken: string | undefined
+) {
+    const text = readString(rawText);
+    const token = readString(matchedToken);
+    if (!text || !token) {
+        return undefined;
+    }
+    const index = text.indexOf(token);
+    if (index < 0) {
+        return undefined;
+    }
+    const title = `${text.slice(0, index)} ${text.slice(index + token.length)}`
+        .replace(/\s+/g, " ")
+        .trim();
+    return title || undefined;
+}
+
 function websocketUrlToHttp(value: string | undefined) {
     if (!value) {
         return undefined;
@@ -2462,6 +2772,7 @@ class XiaoaiCloudPlugin {
     private pendingAgentPromptCount = 0;
     private debugTraceSequence = 0;
     private readonly pendingVerifications = new Map<string, PendingVerificationContext>();
+    private readonly resolvedAudioRelayCandidates = new Map<string, string>();
     private accountClient?: XiaomiAccountClient;
     private minaClient?: MiNAClient;
     private miioClient?: MiIOClient;
@@ -4081,39 +4392,145 @@ class XiaoaiCloudPlugin {
         return orderedBases;
     }
 
+    private stripAudioRelayPathFromUrl(value: string | undefined) {
+        const normalized = normalizeRemoteMediaUrl(value);
+        if (!normalized) {
+            return undefined;
+        }
+        try {
+            const parsed = new URL(normalized);
+            const strippedPath = parsed.pathname.replace(
+                /\/audio-relay\/[^/]+$/i,
+                ""
+            );
+            if (strippedPath === parsed.pathname) {
+                return undefined;
+            }
+            parsed.pathname = strippedPath || "/";
+            parsed.search = "";
+            parsed.hash = "";
+            return normalizeBaseUrl(parsed.toString());
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async collectObservedAudioRelayBaseUrls() {
+        const observedBases = uniqueStrings(
+            this.observedGatewayAuthBaseUrls
+                .map((value) => normalizeBaseUrl(value))
+                .filter((value): value is string => Boolean(value))
+        );
+        const successfulRelayBases: string[] = [];
+        const consoleState = await this.loadConsoleState(false).catch(() => undefined);
+        const events = Array.isArray(consoleState?.events)
+            ? [...consoleState.events].reverse()
+            : [];
+
+        for (const entry of events) {
+            if (successfulRelayBases.length >= 8) {
+                break;
+            }
+            if (readString(entry?.level) !== "success") {
+                continue;
+            }
+            const relayBase = this.stripAudioRelayPathFromUrl(
+                readString(entry?.audioUrl)
+            );
+            if (!relayBase) {
+                continue;
+            }
+            successfulRelayBases.push(relayBase);
+        }
+
+        return {
+            observedBases,
+            successfulRelayBases: uniqueStrings(successfulRelayBases),
+        };
+    }
+
     private async computeAudioRelayBaseUrls() {
         const config = await this.loadConfig(false);
-        const preferredBases: string[] = [];
-        const directBases: string[] = [];
-        const loopbackBases: string[] = [];
-        const addCandidate = (value: string | undefined, options?: { preferred?: boolean }) => {
+        const candidates = new Map<
+            string,
+            {
+                explicitAudio?: boolean;
+                explicitPublic?: boolean;
+                observed?: boolean;
+                relaySuccess?: boolean;
+                lanHint?: boolean;
+                loopback?: boolean;
+                index: number;
+            }
+        >();
+        let candidateIndex = 0;
+        const addCandidate = (
+            value: string | undefined,
+            options?: {
+                explicitAudio?: boolean;
+                explicitPublic?: boolean;
+                observed?: boolean;
+                relaySuccess?: boolean;
+                lanHint?: boolean;
+            }
+        ) => {
             const normalized = normalizeBaseUrl(value);
             if (!normalized) {
                 return;
             }
+            const remember = (nextValue: string) => {
+                try {
+                    const parsed = new URL(nextValue);
+                    const key = parsed.toString().replace(/\/+$/, "");
+                    const existing = candidates.get(key);
+                    candidates.set(key, {
+                        explicitAudio:
+                            existing?.explicitAudio || options?.explicitAudio === true,
+                        explicitPublic:
+                            existing?.explicitPublic || options?.explicitPublic === true,
+                        observed:
+                            existing?.observed || options?.observed === true,
+                        relaySuccess:
+                            existing?.relaySuccess || options?.relaySuccess === true,
+                        lanHint:
+                            existing?.lanHint || options?.lanHint === true,
+                        loopback:
+                            existing?.loopback ||
+                            isLoopbackHostname(parsed.hostname),
+                        index: existing?.index ?? candidateIndex++,
+                    });
+                } catch {
+                    // Ignore malformed bases here and let other candidates continue.
+                }
+            };
             try {
                 const parsed = new URL(normalized);
-                const target = isLoopbackHostname(parsed.hostname)
-                    ? loopbackBases
-                    : options?.preferred
-                        ? preferredBases
-                    : directBases;
                 if (parsed.protocol === "https:" && looksLikeIpHostname(parsed.hostname)) {
                     const httpParsed = new URL(parsed.toString());
                     httpParsed.protocol = "http:";
                     if (httpParsed.port === "443") {
                         httpParsed.port = "";
                     }
-                    target.push(httpParsed.toString().replace(/\/+$/, ""));
+                    remember(httpParsed.toString());
                 }
-                target.push(parsed.toString().replace(/\/+$/, ""));
+                remember(parsed.toString());
             } catch {
                 // Ignore malformed bases here and let other candidates continue.
             }
         };
 
-        addCandidate(config.audioPublicBaseUrl, { preferred: true });
-        addCandidate(config.publicBaseUrl);
+        addCandidate(config.audioPublicBaseUrl, { explicitAudio: true });
+        addCandidate(config.publicBaseUrl, { explicitPublic: true });
+        const observedBases = await this.collectObservedAudioRelayBaseUrls();
+        for (const baseUrl of observedBases.successfulRelayBases) {
+            addCandidate(baseUrl, {
+                observed: true,
+                relaySuccess: true,
+            });
+        }
+        for (const baseUrl of observedBases.observedBases) {
+            addCandidate(baseUrl, { observed: true });
+        }
         for (const gatewayBase of await discoverGatewayBaseUrls(this.api)) {
             const trimmed = gatewayBase.trim();
             if (!trimmed) {
@@ -4122,18 +4539,45 @@ class XiaoaiCloudPlugin {
             addCandidate(`${trimmed.replace(/\/+$/, "")}${config.authRoutePath}`);
         }
 
+        const hasNonLoopbackCandidate = () =>
+            Array.from(candidates.values()).some((entry) => entry.loopback !== true);
         if (
             !config.audioPublicBaseUrl &&
             !config.publicBaseUrl &&
-            preferredBases.length === 0 &&
-            directBases.length === 0
+            !hasNonLoopbackCandidate()
         ) {
             for (const lanBase of await this.computeLanAudioRelayBaseUrls(config)) {
-                addCandidate(lanBase, { preferred: true });
+                addCandidate(lanBase, { lanHint: true });
             }
         }
 
-        return uniqueStrings([...preferredBases, ...directBases, ...loopbackBases]);
+        const ordered = Array.from(candidates.entries())
+            .sort((left, right) => {
+                const scoreDelta =
+                    scoreAudioRelayBaseUrl(right[0], right[1]) -
+                    scoreAudioRelayBaseUrl(left[0], left[1]);
+                if (scoreDelta !== 0) {
+                    return scoreDelta;
+                }
+                return left[1].index - right[1].index;
+            })
+            .map(([value]) => value);
+
+        const nonLoopback = ordered.filter((value) => {
+            try {
+                return !isLoopbackHostname(new URL(value).hostname);
+            } catch {
+                return false;
+            }
+        });
+        const loopback = ordered.filter((value) => {
+            try {
+                return isLoopbackHostname(new URL(value).hostname);
+            } catch {
+                return false;
+            }
+        });
+        return uniqueStrings([...nonLoopback, ...loopback]);
     }
 
     private async computeLanAudioRelayBaseUrls(config: PluginConfig) {
@@ -4646,7 +5090,13 @@ class XiaoaiCloudPlugin {
             this.describeConsoleAudioEvent(latestAudioEvent)
         );
         const position = readNumber(snapshot?.position);
-        const duration = readNumber(snapshot?.duration);
+        const latestAudioRelayEntry = normalizeRemoteMediaUrl(
+            readString(latestAudioEvent?.audioUrl)
+        )
+            ? this.readHostedAudioRelayEntry(readString(latestAudioEvent?.audioUrl) || "")
+            : undefined;
+        const duration =
+            readNumber(snapshot?.duration) || readNumber(latestAudioRelayEntry?.durationMs);
 
         if (
             !title &&
@@ -4970,6 +5420,82 @@ class XiaoaiCloudPlugin {
         };
     }
 
+    private async migrateLegacyOpenclawAudioToolPrompts(config: PluginConfig) {
+        const nextPrompt = normalizeOpenclawVoiceSystemPrompt(
+            DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
+            { fallbackToDefault: true }
+        );
+        const toolsDefinition = findOpenclawWorkspaceFileDefinition("tools");
+        const nextToolsRule = toolsDefinition?.defaultContent || "";
+
+        let nextConfig = config;
+        let profilePromptMigrated = false;
+        if (looksLikeLegacyXiaoaiAgentWorkspacePrompt(config.openclawVoiceSystemPrompt)) {
+            nextConfig = {
+                ...nextConfig,
+                openclawVoiceSystemPrompt: nextPrompt,
+            };
+            profilePromptMigrated = true;
+        }
+
+        let workspacePromptMigrated = false;
+        let workspaceToolsMigrated = false;
+        const globalConfig = await readOpenclawGlobalConfig(this.api).catch(() => undefined);
+        const agentId = this.resolveManagedOpenclawAgentId(nextConfig, globalConfig);
+        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
+        const workspacePath = this.resolveOpenclawAgentWorkspacePath(
+            agentId,
+            agentConfig,
+            globalConfig
+        );
+
+        if (workspacePath) {
+            const agentsFile = await this.readOpenclawWorkspaceFileState(
+                workspacePath,
+                "agents"
+            ).catch(() => undefined);
+            if (
+                agentsFile?.enabled &&
+                looksLikeLegacyXiaoaiAgentWorkspacePrompt(agentsFile.content)
+            ) {
+                await this.writeOpenclawWorkspaceFile(workspacePath, "agents", nextPrompt);
+                workspacePromptMigrated = true;
+            }
+
+            const toolsFile = await this.readOpenclawWorkspaceFileState(
+                workspacePath,
+                "tools"
+            ).catch(() => undefined);
+            if (
+                toolsFile?.enabled &&
+                looksLikeLegacyXiaoaiToolsWorkspaceRule(toolsFile.content)
+            ) {
+                await this.writeOpenclawWorkspaceFile(
+                    workspacePath,
+                    "tools",
+                    nextToolsRule
+                );
+                workspaceToolsMigrated = true;
+            }
+        }
+
+        if (profilePromptMigrated) {
+            this.config = nextConfig;
+            await this.persistResolvedProfile(nextConfig, this.device, true);
+        }
+
+        if (profilePromptMigrated || workspacePromptMigrated || workspaceToolsMigrated) {
+            await this.appendDebugTrace("openclaw_workspace_prompt_migrated", {
+                agentId,
+                profilePromptMigrated,
+                workspacePromptMigrated,
+                workspaceToolsMigrated,
+            });
+        }
+
+        return nextConfig;
+    }
+
     private readOpenclawResponsesEndpointEnabled(
         globalConfig: Record<string, any> | undefined
     ) {
@@ -5285,7 +5811,8 @@ class XiaoaiCloudPlugin {
     }
 
     private async initialize() {
-        const config = await this.loadConfig(true);
+        let config = await this.loadConfig(true);
+        config = await this.migrateLegacyOpenclawAudioToolPrompts(config);
         console.log(
             `[XiaoAI Cloud] 小米网络调试日志: ${config.debugLogPath} (${config.debugLogEnabled ? "已开启" : "已关闭"})`
         );
@@ -5675,14 +6202,14 @@ class XiaoaiCloudPlugin {
             }
             if (requestMethod === "POST" && action === "speaker/play-audio") {
                 const body = await readJsonBody(request);
-                const url = normalizeRemoteMediaUrl(readString(body?.url));
+                const url = normalizeAudioPlaybackInput(readString(body?.url));
                 const title = readString(body?.title);
                 const audioDetail = url ? this.describeAudioReply(url, title) : undefined;
                 const interrupt = readBoolean(body?.interrupt) !== false;
                 const forceRetry = readBoolean(body?.forceRetry) !== false;
                 if (!url) {
                     sendJson(response, 400, {
-                        error: "请输入可直接访问的 http/https 音频 URL。",
+                        error: "请输入可直接访问的 http/https 音频 URL，或本机可读的绝对路径（支持 file://）。",
                     });
                     return true;
                 }
@@ -5718,8 +6245,12 @@ class XiaoaiCloudPlugin {
                 }
                 sendJson(response, 200, {
                     ok: true,
-                    playback: "speaker",
-                    message: `${played.detail}，已开始播放。`,
+                    playback: played.pending ? "speaker-pending" : "speaker",
+                    pending: played.pending === true,
+                    message:
+                        played.pending === true
+                            ? `${played.detail}，音箱已接收，正在缓冲。`
+                            : `${played.detail}，已开始播放。`,
                     title: this.normalizeAudioReplyTitle(played.detail),
                     detail: played.detail,
                     url: played.url,
@@ -8867,6 +9398,13 @@ class XiaoaiCloudPlugin {
             }
             return `音频回复：${parsed.host}`;
         } catch {
+            const localPath = normalizeLocalMediaPath(url) || readString(url);
+            if (localPath) {
+                const filename = path.basename(localPath).trim();
+                if (filename) {
+                    return `音频回复：${filename}`;
+                }
+            }
             return "音频回复";
         }
     }
@@ -8924,12 +9462,56 @@ class XiaoaiCloudPlugin {
         return typeof position === "number" && position > 0;
     }
 
+    private isExternalAudioPlaceholderSnapshot(
+        snapshot: SpeakerPlaybackSnapshot | null,
+        expectedAudioId?: string
+    ) {
+        if (!snapshot || readNumber(snapshot.status) !== 2) {
+            return false;
+        }
+        const normalizedExpectedAudioId = readString(expectedAudioId);
+        if (normalizedExpectedAudioId) {
+            if (!this.speakerSnapshotHasAudioId(snapshot, normalizedExpectedAudioId)) {
+                return false;
+            }
+        } else {
+            const snapshotAudioId = readString(snapshot.audioId);
+            const hasExternalAudioIdHint =
+                this.speakerSnapshotHasAudioId(snapshot, EXTERNAL_AUDIO_DEFAULT_ID) ||
+                Boolean(snapshotAudioId);
+            if (!hasExternalAudioIdHint) {
+                return false;
+            }
+        }
+        const position = Math.max(0, readNumber(snapshot.position) || 0);
+        const duration = Math.max(0, readNumber(snapshot.duration) || 0);
+        return position === 0 && duration > 0;
+    }
+
+    private sanitizeSpeakerPlaybackBaseline(
+        snapshot: SpeakerPlaybackSnapshot | null
+    ) {
+        if (this.isExternalAudioPlaceholderSnapshot(snapshot)) {
+            return null;
+        }
+        return snapshot;
+    }
+
     private isSpeakerPlaybackActivelyPlaying(snapshot: SpeakerPlaybackSnapshot | null) {
         if (!snapshot) {
             return false;
         }
         const position = Math.max(0, readNumber(snapshot.position) || 0);
         return readNumber(snapshot.status) === 1 || position > 0;
+    }
+
+    private isSpeakerPlaybackZeroProgress(snapshot: SpeakerPlaybackSnapshot | null) {
+        if (!snapshot) {
+            return true;
+        }
+        const position = Math.max(0, readNumber(snapshot.position) || 0);
+        const duration = Math.max(0, readNumber(snapshot.duration) || 0);
+        return position <= 0 && duration <= 0;
     }
 
     private summarizeSpeakerPlaybackSnapshot(
@@ -8951,6 +9533,214 @@ class XiaoaiCloudPlugin {
             hasContext: this.hasSpeakerPlaybackContext(snapshot),
             active: this.isSpeakerPlaybackActivelyPlaying(snapshot),
         };
+    }
+
+    private isSpeakerPlaybackContextUnchanged(
+        before: SpeakerPlaybackSnapshot | null,
+        current: SpeakerPlaybackSnapshot | null
+    ) {
+        const beforeSummary = this.summarizeSpeakerPlaybackSnapshot(before);
+        const currentSummary = this.summarizeSpeakerPlaybackSnapshot(current);
+        if (!beforeSummary && !currentSummary) {
+            return true;
+        }
+        if (!beforeSummary || !currentSummary) {
+            return !Boolean(beforeSummary?.hasContext || currentSummary?.hasContext);
+        }
+        return (
+            beforeSummary.status === currentSummary.status &&
+            beforeSummary.mediaType === currentSummary.mediaType &&
+            beforeSummary.audioId === currentSummary.audioId &&
+            beforeSummary.position === currentSummary.position &&
+            beforeSummary.duration === currentSummary.duration &&
+            beforeSummary.trackList.join(",") === currentSummary.trackList.join(",")
+        );
+    }
+
+    private hasSpeakerPlaybackObservableProgress(
+        before: SpeakerPlaybackSnapshot | null,
+        current: SpeakerPlaybackSnapshot | null,
+        options?: SpeakerPlaybackVerifyOptions
+    ) {
+        if (!current) {
+            return false;
+        }
+        if (
+            this.hasSpeakerPlaybackStarted(before, current, options)
+        ) {
+            return true;
+        }
+        if (this.isSpeakerPlaybackStalledQueued(current, options)) {
+            return false;
+        }
+        return Boolean(
+            this.detectConversationInterceptCalibrationPlaybackReason(
+                before || null,
+                before || null,
+                current
+            )
+        );
+    }
+
+    private isSpeakerPlaybackStalledQueued(
+        snapshot: SpeakerPlaybackSnapshot | null,
+        options?: SpeakerPlaybackVerifyOptions
+    ) {
+        if (!snapshot || readNumber(snapshot.status) !== 2) {
+            return false;
+        }
+        const position = Math.max(0, readNumber(snapshot.position) || 0);
+        const duration = Math.max(0, readNumber(snapshot.duration) || 0);
+        if (position > 0 || duration > 0) {
+            return false;
+        }
+        const expectedAudioId = readString(options?.expectedAudioId);
+        if (expectedAudioId && !this.speakerSnapshotHasAudioId(snapshot, expectedAudioId)) {
+            return false;
+        }
+        return true;
+    }
+
+    private detectSpeakerPlaybackBootstrapReason(
+        before: SpeakerPlaybackSnapshot | null,
+        current: SpeakerPlaybackSnapshot | null,
+        options?: SpeakerPlaybackVerifyOptions
+    ) {
+        if (!current || readNumber(current.status) !== 2) {
+            return undefined;
+        }
+        if (this.isSpeakerPlaybackActivelyPlaying(current)) {
+            return undefined;
+        }
+        if (this.isSpeakerPlaybackStalledQueued(current, options)) {
+            return undefined;
+        }
+
+        const expectedAudioId = readString(options?.expectedAudioId);
+        const queued = this.hasSpeakerPlaybackQueued(before, current, options);
+        const duration = Math.max(0, readNumber(current.duration) || 0);
+        const trackCount = (current.trackList || []).length;
+        const audioMatched = expectedAudioId
+            ? this.speakerSnapshotHasAudioId(current, expectedAudioId)
+            : queued || Boolean(readString(current.audioId)) || trackCount > 0;
+
+        if (!audioMatched) {
+            return undefined;
+        }
+        if (duration > 0) {
+            return "queued_with_duration";
+        }
+        if (queued && trackCount > 0) {
+            return "queued_with_track_list";
+        }
+        if (queued) {
+            return "queued";
+        }
+        return undefined;
+    }
+
+    private shouldServeInitialRangeRequestAsFullResponse(rangeHeader?: string) {
+        if (!AUDIO_RELAY_RANGE0_FULL_RESPONSE_COMPAT) {
+            return false;
+        }
+        const normalizedRange = readString(rangeHeader)?.trim().toLowerCase() || "";
+        if (!normalizedRange) {
+            return false;
+        }
+        // Optional compatibility toggle for old firmware that expects full-body
+        // response on the first open-ended range probe.
+        return normalizedRange === "bytes=0-";
+    }
+
+    private async traceAudioRelayServe(
+        relayId: string,
+        entry: AudioRelayEntry,
+        details: {
+            requestMethod: string;
+            rangeHeader?: string;
+            responseStatus: number;
+            totalBytes: number;
+            servedBytes: number;
+            servedStart?: number;
+            servedEnd?: number;
+            servedAsFullResponse?: boolean;
+        }
+    ) {
+        const traceKey = [
+            details.requestMethod,
+            readString(details.rangeHeader) || "",
+            details.responseStatus,
+            details.servedBytes,
+            typeof details.servedStart === "number" ? details.servedStart : "",
+            typeof details.servedEnd === "number" ? details.servedEnd : "",
+            details.servedAsFullResponse === true ? "full" : "",
+        ].join("|");
+        const shouldTrace =
+            entry.hitCount <= 6 || entry.lastServeTraceKey !== traceKey;
+        entry.lastServeTraceKey = traceKey;
+        if (!shouldTrace) {
+            return;
+        }
+        await this.appendDebugTrace("audio_relay_served", {
+            relayId,
+            sourceUrl: entry.sourceUrl || entry.sourceLabel,
+            hitCount: entry.hitCount,
+            requestMethod: details.requestMethod,
+            rangeHeader: details.rangeHeader,
+            responseStatus: details.responseStatus,
+            totalBytes: details.totalBytes,
+            servedBytes: details.servedBytes,
+            servedStart: details.servedStart,
+            servedEnd: details.servedEnd,
+            servedAsFullResponse: details.servedAsFullResponse === true,
+            host: entry.lastHitAddress,
+        });
+    }
+
+    private shouldAcceptRelayHitStart(
+        before: SpeakerPlaybackSnapshot | null,
+        current: SpeakerPlaybackSnapshot | null,
+        relayUsageBefore: number | undefined,
+        relayHitObserved: boolean,
+        relayHitCount: number | undefined,
+        options?: SpeakerPlaybackVerifyOptions
+    ) {
+        const relayHitDelta = Math.max(
+            0,
+            Math.round((relayHitCount || 0) - (relayUsageBefore || 0))
+        );
+        if (
+            !options?.allowRelayHitStart ||
+            !options?.relayUrl ||
+            !relayHitObserved ||
+            relayHitDelta < 1 ||
+            !current
+        ) {
+            return false;
+        }
+        if (this.hasSpeakerPlaybackObservableProgress(before, current, options)) {
+            return true;
+        }
+
+        const stalledQueued = this.isSpeakerPlaybackStalledQueued(current, options);
+        const contextChanged = !this.isSpeakerPlaybackContextUnchanged(before, current);
+        const bootstrapReason = this.detectSpeakerPlaybackBootstrapReason(
+            before,
+            current,
+            options
+        );
+        const hadContextBefore = this.hasSpeakerPlaybackContext(before);
+        const hasContextNow = this.hasSpeakerPlaybackContext(current);
+
+        if (
+            !stalledQueued &&
+            !this.isSpeakerPlaybackPausedOrStopped(current) &&
+            (contextChanged || Boolean(bootstrapReason))
+        ) {
+            return true;
+        }
+
+        return false;
     }
 
     private detectConversationInterceptCalibrationPlaybackReason(
@@ -9124,6 +9914,10 @@ class XiaoaiCloudPlugin {
         options?: SpeakerPlaybackVerifyOptions
     ): Promise<SpeakerPlaybackVerifyResult> {
         let lastSnapshot: SpeakerPlaybackSnapshot | null = before;
+        let lastRawSnapshot: SpeakerPlaybackSnapshot | null = before;
+        let bootstrapObserved = false;
+        let bootstrapReason: string | undefined;
+        let placeholderObserved = false;
         const relayUsageBefore =
             typeof options?.relayHitCount === "number"
                 ? options.relayHitCount
@@ -9132,9 +9926,32 @@ class XiaoaiCloudPlugin {
                     : undefined;
         let relayHitObserved = false;
         let relayHitCount = relayUsageBefore;
+        const isHostedRelayCandidate = Boolean(
+            options?.relayUrl && this.isHostedAudioRelayUrl(options.relayUrl)
+        );
+        const buildFailedVerifyResult = (): SpeakerPlaybackVerifyResult => ({
+            started: false,
+            snapshot: lastSnapshot,
+            rawSnapshot: lastRawSnapshot,
+            relayHitObserved,
+            relayHitCount,
+            startedByRelayHit: false,
+            startedByRelayHitReason: undefined,
+            bootstrapObserved,
+            bootstrapReason,
+            placeholderObserved,
+        });
 
         const probePlaybackState = async (): Promise<SpeakerPlaybackVerifyResult | null> => {
-            const current = await this.readSpeakerPlaybackSnapshotWithTiming(mina, deviceId);
+            const rawCurrent =
+                (await this.readSpeakerPlaybackSnapshotWithTiming(mina, deviceId, {
+                    timeoutMs: AUDIO_PLAYBACK_FAST_STATUS_TIMEOUT_MS,
+                    maxAttempts: AUDIO_PLAYBACK_FAST_STATUS_MAX_ATTEMPTS,
+                })) || null;
+            if (this.isExternalAudioPlaceholderSnapshot(rawCurrent)) {
+                placeholderObserved = true;
+            }
+            const current = this.sanitizeSpeakerPlaybackBaseline(rawCurrent);
             if (options?.relayUrl) {
                 const usage = this.readAudioRelayUsageForUrl(options.relayUrl);
                 if (usage) {
@@ -9147,31 +9964,74 @@ class XiaoaiCloudPlugin {
                     }
                 }
             }
-            if (this.hasSpeakerPlaybackQueued(lastSnapshot, current, options)) {
+            if (
+                options?.acceptQueuedStart === true &&
+                this.hasSpeakerPlaybackQueued(lastSnapshot, current, options)
+            ) {
                 return {
                     started: true,
                     snapshot: current,
+                    rawSnapshot: rawCurrent,
                     relayHitObserved,
                     relayHitCount,
+                    bootstrapObserved,
+                    bootstrapReason,
+                    placeholderObserved,
                 };
             }
             if (this.hasSpeakerPlaybackStarted(lastSnapshot, current, options)) {
                 return {
                     started: true,
                     snapshot: current,
+                    rawSnapshot: rawCurrent,
                     relayHitObserved,
                     relayHitCount,
+                    bootstrapObserved,
+                    bootstrapReason,
+                    placeholderObserved,
                 };
             }
-            if (options?.allowRelayHitStart && options?.relayUrl && relayHitObserved) {
+            if (
+                this.shouldAcceptRelayHitStart(
+                    before,
+                    current,
+                    relayUsageBefore,
+                    relayHitObserved,
+                    relayHitCount,
+                    options
+                )
+            ) {
                 return {
                     started: true,
                     snapshot: current || lastSnapshot,
+                    rawSnapshot: rawCurrent || lastRawSnapshot,
                     relayHitObserved,
                     relayHitCount,
                     startedByRelayHit: true,
+                    startedByRelayHitReason: this.hasSpeakerPlaybackObservableProgress(
+                        before,
+                        current,
+                        options
+                    )
+                        ? "relay_hit_progress"
+                        : this.isSpeakerPlaybackStalledQueued(current, options)
+                          ? "buffered_relay_hit_stalled_bootstrap"
+                        : "buffered_relay_hit_context_bootstrap",
+                    bootstrapObserved,
+                    bootstrapReason,
+                    placeholderObserved,
                 };
             }
+            const nextBootstrapReason = this.detectSpeakerPlaybackBootstrapReason(
+                before,
+                current,
+                options
+            );
+            if (nextBootstrapReason) {
+                bootstrapObserved = true;
+                bootstrapReason = nextBootstrapReason;
+            }
+            lastRawSnapshot = rawCurrent;
             lastSnapshot = current;
             return null;
         };
@@ -9181,7 +10041,7 @@ class XiaoaiCloudPlugin {
             return immediateResult;
         }
 
-        for (const delayMs of AUDIO_PLAYBACK_VERIFY_DELAYS_MS) {
+        for (const [index, delayMs] of AUDIO_PLAYBACK_VERIFY_DELAYS_MS.entries()) {
             if (delayMs > 0) {
                 await sleep(delayMs);
             }
@@ -9189,21 +10049,120 @@ class XiaoaiCloudPlugin {
             if (delayedResult) {
                 return delayedResult;
             }
+            if (isHostedRelayCandidate) {
+                const relayHitDelta = Math.max(
+                    0,
+                    Math.round((relayHitCount || 0) - (relayUsageBefore || 0))
+                );
+                const playbackProgress = this.hasSpeakerPlaybackObservableProgress(
+                    before,
+                    lastSnapshot,
+                    options
+                );
+                const contextUnchanged = this.isSpeakerPlaybackContextUnchanged(
+                    before,
+                    lastSnapshot
+                );
+                const stalledQueued = this.isSpeakerPlaybackStalledQueued(
+                    lastSnapshot,
+                    options
+                );
+                if (!playbackProgress && contextUnchanged) {
+                    if (index === 0 && relayHitDelta === 0) {
+                        return buildFailedVerifyResult();
+                    }
+                    if (
+                        index >= 2 &&
+                        relayHitDelta >= 2 &&
+                        !(
+                            options?.allowRelayHitStart === true &&
+                            relayHitDelta >= 1
+                        )
+                    ) {
+                        return buildFailedVerifyResult();
+                    }
+                }
+                if (!playbackProgress && stalledQueued) {
+                    if (index === 0 && relayHitDelta === 0) {
+                        return buildFailedVerifyResult();
+                    }
+                    if (
+                        index >= 1 &&
+                        !(
+                            options?.allowRelayHitStart === true &&
+                            relayHitDelta >= 1
+                        )
+                    ) {
+                        return buildFailedVerifyResult();
+                    }
+                }
+            }
         }
+        if (
+            isHostedRelayCandidate &&
+            relayHitObserved &&
+            options?.allowRelayHitStart === true &&
+            !this.hasSpeakerPlaybackObservableProgress(before, lastSnapshot, options)
+        ) {
+            for (const delayMs of AUDIO_PLAYBACK_FIRST_RELAY_HIT_GRACE_DELAYS_MS) {
+                if (delayMs > 0) {
+                    await sleep(delayMs);
+                }
+                const graceResult = await probePlaybackState();
+                if (graceResult) {
+                    return graceResult;
+                }
+                if (
+                    this.hasSpeakerPlaybackObservableProgress(
+                        before,
+                        lastSnapshot,
+                        options
+                    )
+                ) {
+                    break;
+                }
+                if (
+                    Math.max(
+                        0,
+                        Math.round((relayHitCount || 0) - (relayUsageBefore || 0))
+                    ) >= 2
+                ) {
+                    break;
+                }
+            }
+        }
+        if (bootstrapObserved) {
+            for (const delayMs of AUDIO_PLAYBACK_BOOTSTRAP_VERIFY_DELAYS_MS) {
+                if (delayMs > 0) {
+                    await sleep(delayMs);
+                }
+                const bootstrapResult = await probePlaybackState();
+                if (bootstrapResult) {
+                    return bootstrapResult;
+                }
+            }
+        }
+        const allowRelayHitStart = this.shouldAcceptRelayHitStart(
+            before,
+            lastSnapshot,
+            relayUsageBefore,
+            relayHitObserved,
+            relayHitCount,
+            options
+        );
         return {
-            started: Boolean(
-                options?.relayUrl &&
-                    relayHitObserved &&
-                    (options?.allowRelayHitStart || !options?.expectedAudioId)
-            ),
+            started: allowRelayHitStart,
             snapshot: lastSnapshot,
             relayHitObserved,
             relayHitCount,
-            startedByRelayHit: Boolean(
-                options?.relayUrl &&
-                    relayHitObserved &&
-                    (options?.allowRelayHitStart || !options?.expectedAudioId)
-            ),
+            startedByRelayHit: allowRelayHitStart,
+            startedByRelayHitReason: allowRelayHitStart
+                ? this.isSpeakerPlaybackStalledQueued(lastSnapshot, options)
+                    ? "buffered_relay_hit_stalled_bootstrap"
+                    : "buffered_relay_hit_context_bootstrap"
+                : undefined,
+            bootstrapObserved,
+            bootstrapReason,
         };
     }
 
@@ -9416,14 +10375,34 @@ class XiaoaiCloudPlugin {
     ) {
         const guard = this.readExternalAudioLoopGuard(device.minaDeviceId, token);
         const deadlineAtMs = readNumber(guard?.deadlineAtMs);
-        if (!guard || typeof deadlineAtMs !== "number") {
+        const pendingStartupDeadlineAtMs = readNumber(
+            guard?.pendingStartupDeadlineAtMs
+        );
+        const scheduledDeadlineAtMs =
+            typeof deadlineAtMs === "number"
+                ? deadlineAtMs
+                : typeof pendingStartupDeadlineAtMs === "number"
+                  ? pendingStartupDeadlineAtMs
+                  : undefined;
+        const deadlineKind =
+            typeof deadlineAtMs === "number"
+                ? "playback"
+                : typeof pendingStartupDeadlineAtMs === "number"
+                  ? "pending_startup"
+                  : undefined;
+        if (!guard || typeof scheduledDeadlineAtMs !== "number" || !deadlineKind) {
             return;
         }
 
         this.clearExternalAudioLoopGuardDeadlineTimer(guard);
-        const delayMs = Math.max(0, deadlineAtMs - Date.now());
+        const delayMs = Math.max(0, scheduledDeadlineAtMs - Date.now());
         guard.deadlineTimer = setTimeout(() => {
-            void this.runExternalAudioLoopGuardDeadline(mina, device, token, reason);
+            void this.runExternalAudioLoopGuardDeadline(
+                mina,
+                device,
+                token,
+                `${reason}:${deadlineKind}`
+            );
         }, delayMs);
         guard.deadlineTimer.unref?.();
         this.externalAudioLoopGuards.set(device.minaDeviceId, guard);
@@ -9434,6 +10413,9 @@ class XiaoaiCloudPlugin {
             expectedAudioId: guard.expectedAudioId,
             reason,
             deadlineAtMs,
+            pendingStartupDeadlineAtMs,
+            scheduledDeadlineAtMs,
+            deadlineKind,
             delayMs,
         });
     }
@@ -9447,6 +10429,7 @@ class XiaoaiCloudPlugin {
             startedWithUrl: string;
             title?: string;
             deadlineAtMs?: number;
+            pendingStartupDeadlineAtMs?: number;
         }
     ) {
         const token = randomBytes(8).toString("hex");
@@ -9459,6 +10442,9 @@ class XiaoaiCloudPlugin {
             title: readString(options.title),
             armedAtMs: Date.now(),
             deadlineAtMs: readNumber(options.deadlineAtMs),
+            pendingStartupDeadlineAtMs: readNumber(
+                options.pendingStartupDeadlineAtMs
+            ),
         };
         this.externalAudioLoopGuards.set(device.minaDeviceId, guard);
         void this.appendDebugTrace("audio_loop_guard_armed", {
@@ -9469,6 +10455,7 @@ class XiaoaiCloudPlugin {
             startedWithUrl: guard.startedWithUrl,
             title: guard.title,
             deadlineAtMs: guard.deadlineAtMs,
+            pendingStartupDeadlineAtMs: guard.pendingStartupDeadlineAtMs,
         });
         this.scheduleExternalAudioLoopGuardDeadline(mina, device, token, "armed");
         void this.runExternalAudioLoopGuard(mina, device, token).catch((error) => {
@@ -9497,6 +10484,17 @@ class XiaoaiCloudPlugin {
 
         try {
             const deadlineAtMs = readNumber(guard.deadlineAtMs);
+            const pendingStartupDeadlineAtMs = readNumber(
+                guard.pendingStartupDeadlineAtMs
+            );
+            if (
+                typeof deadlineAtMs !== "number" &&
+                typeof pendingStartupDeadlineAtMs !== "number"
+            ) {
+                guard.deadlineHandling = false;
+                this.externalAudioLoopGuards.set(deviceId, guard);
+                return;
+            }
             const cachedSnapshotAgeMs =
                 typeof guard.lastSnapshotAtMs === "number"
                     ? Date.now() - guard.lastSnapshotAtMs
@@ -9727,6 +10725,9 @@ class XiaoaiCloudPlugin {
             }
 
             let deadlineAtMs = readNumber(guard.deadlineAtMs);
+            let pendingStartupDeadlineAtMs = readNumber(
+                guard.pendingStartupDeadlineAtMs
+            );
             const stablePlaybackObserved =
                 seenPlaying ||
                 this.isSpeakerPlaybackActivelyPlaying(previousSnapshot) ||
@@ -9748,8 +10749,10 @@ class XiaoaiCloudPlugin {
                     );
                 if (typeof relayHitDeadlineAtMs === "number") {
                     guard.deadlineAtMs = relayHitDeadlineAtMs;
+                    guard.pendingStartupDeadlineAtMs = undefined;
                     this.externalAudioLoopGuards.set(deviceId, guard);
                     deadlineAtMs = relayHitDeadlineAtMs;
+                    pendingStartupDeadlineAtMs = undefined;
                     await this.appendDebugTrace("audio_loop_guard_deadline_set", {
                         deviceId,
                         token,
@@ -9768,6 +10771,16 @@ class XiaoaiCloudPlugin {
                     );
                 }
             }
+            const effectiveDeadlineAtMs =
+                typeof deadlineAtMs === "number"
+                    ? deadlineAtMs
+                    : pendingStartupDeadlineAtMs;
+            const effectiveDeadlineSource =
+                typeof deadlineAtMs === "number"
+                    ? "playback-deadline"
+                    : typeof pendingStartupDeadlineAtMs === "number"
+                      ? "pending-startup-timeout"
+                      : undefined;
             const nowMs = Date.now();
             const previousDuration = readNumber(previousSnapshot?.duration);
             const previousPosition = readNumber(previousSnapshot?.position);
@@ -9785,9 +10798,9 @@ class XiaoaiCloudPlugin {
                 ? EXTERNAL_AUDIO_LOOP_GUARD_NEAR_END_POLL_MS
                 : EXTERNAL_AUDIO_LOOP_GUARD_POLL_MS;
             const sleepMs =
-                typeof deadlineAtMs === "number"
+                typeof effectiveDeadlineAtMs === "number"
                     ? clamp(
-                        Math.min(nextPollMs, Math.max(0, deadlineAtMs - nowMs)),
+                        Math.min(nextPollMs, Math.max(0, effectiveDeadlineAtMs - nowMs)),
                         0,
                         nextPollMs
                     )
@@ -9797,17 +10810,18 @@ class XiaoaiCloudPlugin {
             }
 
             if (
-                typeof deadlineAtMs === "number" &&
-                (seenPlaying || guard.startedWithUrl) &&
+                typeof effectiveDeadlineAtMs === "number" &&
                 !guard.deadlineHandling &&
                 !guard.deadlineTimer &&
-                Date.now() >= deadlineAtMs
+                Date.now() >= effectiveDeadlineAtMs
             ) {
                 await this.runExternalAudioLoopGuardDeadline(
                     mina,
                     device,
                     token,
-                    "deadline-poll"
+                    effectiveDeadlineSource === "pending-startup-timeout"
+                        ? "pending-startup-timeout-poll"
+                        : "deadline-poll"
                 );
                 return;
             }
@@ -9834,6 +10848,17 @@ class XiaoaiCloudPlugin {
 
             if (this.isSpeakerPlaybackActivelyPlaying(snapshot)) {
                 seenPlaying = true;
+                if (typeof guard.pendingStartupDeadlineAtMs === "number") {
+                    this.clearExternalAudioLoopGuardDeadlineTimer(guard);
+                    guard.pendingStartupDeadlineAtMs = undefined;
+                    this.externalAudioLoopGuards.set(deviceId, guard);
+                    pendingStartupDeadlineAtMs = undefined;
+                    await this.appendDebugTrace("audio_loop_guard_pending_startup_cleared", {
+                        deviceId,
+                        token,
+                        expectedAudioId: guard.expectedAudioId,
+                    });
+                }
             }
 
             const duration = readNumber(snapshot.duration);
@@ -9871,6 +10896,7 @@ class XiaoaiCloudPlugin {
                             ) +
                             EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_GRACE_MS;
                 guard.deadlineAtMs = dynamicDeadlineAtMs;
+                guard.pendingStartupDeadlineAtMs = undefined;
                 this.externalAudioLoopGuards.set(deviceId, guard);
                 await this.appendDebugTrace("audio_loop_guard_deadline_set", {
                     deviceId,
@@ -10197,7 +11223,132 @@ class XiaoaiCloudPlugin {
         } satisfies AudioRelayEntry;
     }
 
-    private async buildAudioRelayCandidateUrls(
+    private buildManagedAudioRelayUrl(relayId: string, extension: string) {
+        return `${INTERNAL_AUDIO_RELAY_SCHEME}:///audio-relay/${relayId}${extension}`;
+    }
+
+    private parseManagedAudioRelayReference(url: string): ParsedAudioRelayReference | undefined {
+        try {
+            const parsed = new URL(url);
+            if (
+                parsed.protocol !== `${INTERNAL_AUDIO_RELAY_SCHEME}:` &&
+                !/(?:^|\/)audio-relay\/[^/]+$/i.test(parsed.pathname)
+            ) {
+                return undefined;
+            }
+            const relayName = parsed.pathname.split("/").pop() || "";
+            const relayId = relayName.replace(/\.[a-z0-9]+$/i, "").trim();
+            if (!relayId) {
+                return undefined;
+            }
+            return {
+                relayId,
+                extension: path.extname(relayName).toLowerCase() || ".mp3",
+            };
+        } catch {
+            return undefined;
+        }
+    }
+
+    private rememberSharedAudioRelayUsage(
+        relayId: string,
+        usage: AudioRelaySharedUsage
+    ) {
+        if (!relayId) {
+            return;
+        }
+        const previous = sharedAudioRelayUsage.get(relayId);
+        sharedAudioRelayUsage.set(relayId, {
+            hitCount: Math.max(
+                0,
+                Math.round(
+                    Math.max(previous?.hitCount || 0, usage.hitCount || 0)
+                )
+            ),
+            lastHitAtMs:
+                Math.max(
+                    0,
+                    Math.round(
+                        Math.max(previous?.lastHitAtMs || 0, usage.lastHitAtMs || 0)
+                    )
+                ) || previous?.lastHitAtMs,
+            lastHitAddress:
+                readString(usage.lastHitAddress) ||
+                readString(previous?.lastHitAddress) ||
+                undefined,
+        });
+        while (sharedAudioRelayUsage.size > MAX_AUDIO_RELAY_ENTRIES * 6) {
+            const oldest = sharedAudioRelayUsage.keys().next().value;
+            if (!oldest) {
+                break;
+            }
+            sharedAudioRelayUsage.delete(oldest);
+        }
+    }
+
+    private readSharedAudioRelayUsage(relayId: string) {
+        if (!relayId) {
+            return undefined;
+        }
+        return sharedAudioRelayUsage.get(relayId);
+    }
+
+    private buildAudioRelayCandidateUrl(baseUrl: string, relayId: string, extension: string) {
+        const normalizedBase = normalizeBaseUrl(baseUrl);
+        if (!normalizedBase) {
+            return undefined;
+        }
+        return `${normalizedBase.replace(/\/+$/, "")}/audio-relay/${relayId}${extension}`;
+    }
+
+    private async resolveManagedAudioRelayCandidateUrls(url: string) {
+        const relay = this.parseManagedAudioRelayReference(url);
+        if (!relay) {
+            return [];
+        }
+        const candidates: string[] = [];
+        for (const baseUrl of await this.computeAudioRelayBaseUrls()) {
+            const normalizedBase = normalizeBaseUrl(baseUrl);
+            if (!normalizedBase) {
+                continue;
+            }
+            try {
+                const parsed = new URL(normalizedBase);
+                if (
+                    !this.config?.publicBaseUrl &&
+                    parsed.protocol === "https:" &&
+                    looksLikeIpHostname(parsed.hostname)
+                ) {
+                    parsed.protocol = "http:";
+                    const fallbackCandidate = `${parsed
+                        .toString()
+                        .replace(/\/+$/, "")}/audio-relay/${relay.relayId}${relay.extension}`;
+                    this.rememberResolvedAudioRelayCandidate(
+                        fallbackCandidate,
+                        this.buildManagedAudioRelayUrl(relay.relayId, relay.extension)
+                    );
+                    candidates.push(fallbackCandidate);
+                }
+                const candidate = this.buildAudioRelayCandidateUrl(
+                    normalizedBase,
+                    relay.relayId,
+                    relay.extension
+                );
+                if (candidate) {
+                    this.rememberResolvedAudioRelayCandidate(
+                        candidate,
+                        this.buildManagedAudioRelayUrl(relay.relayId, relay.extension)
+                    );
+                    candidates.push(candidate);
+                }
+            } catch {
+                continue;
+            }
+        }
+        return uniqueStrings(candidates);
+    }
+
+    private async registerRemoteAudioRelaySource(
         sourceUrl: string,
         options?: { transcodeToMp3?: boolean }
     ) {
@@ -10221,36 +11372,10 @@ class XiaoaiCloudPlugin {
             hitCount: 0,
         });
         this.pruneAudioRelayEntries(nowMs);
-
-        const candidates: string[] = [];
-        for (const baseUrl of await this.computeAudioRelayBaseUrls()) {
-            const normalizedBase = normalizeBaseUrl(baseUrl);
-            if (!normalizedBase) {
-                continue;
-            }
-            try {
-                const parsed = new URL(normalizedBase);
-                if (
-                    !this.config?.publicBaseUrl &&
-                    parsed.protocol === "https:" &&
-                    looksLikeIpHostname(parsed.hostname)
-                ) {
-                    parsed.protocol = "http:";
-                    candidates.push(
-                        `${parsed.toString().replace(/\/+$/, "")}/audio-relay/${relayId}${extension}`
-                    );
-                }
-                candidates.push(
-                    `${normalizedBase.replace(/\/+$/, "")}/audio-relay/${relayId}${extension}`
-                );
-            } catch {
-                continue;
-            }
-        }
-        return uniqueStrings(candidates);
+        return this.buildManagedAudioRelayUrl(relayId, extension);
     }
 
-    private async buildBufferedAudioRelayCandidateUrls(
+    private async registerBufferedAudioRelaySource(
         buffer: Buffer,
         options?: {
             extension?: string;
@@ -10276,7 +11401,8 @@ class XiaoaiCloudPlugin {
             extension,
             buffer,
             filePath,
-            contentType: readString(options?.contentType) || contentTypeForAudioExtension(extension),
+            contentType:
+                readString(options?.contentType) || contentTypeForAudioExtension(extension),
             sourceLabel: readString(options?.sourceLabel),
             createdAtMs: nowMs,
             expiresAtMs: nowMs + AUDIO_RELAY_TTL_MS,
@@ -10285,33 +11411,115 @@ class XiaoaiCloudPlugin {
             tailPaddingMs: readNumber(options?.tailPaddingMs),
         });
         this.pruneAudioRelayEntries(nowMs);
+        return this.buildManagedAudioRelayUrl(relayId, extension);
+    }
 
-        const candidates: string[] = [];
-        for (const baseUrl of await this.computeAudioRelayBaseUrls()) {
-            const normalizedBase = normalizeBaseUrl(baseUrl);
-            if (!normalizedBase) {
-                continue;
+    private async buildAudioRelayCandidateUrls(
+        sourceUrl: string,
+        options?: { transcodeToMp3?: boolean }
+    ) {
+        const relayUrl = await this.registerRemoteAudioRelaySource(sourceUrl, options);
+        return this.resolveManagedAudioRelayCandidateUrls(relayUrl);
+    }
+
+    private async buildBufferedAudioRelayCandidateUrls(
+        buffer: Buffer,
+        options?: {
+            extension?: string;
+            contentType?: string;
+            sourceLabel?: string;
+            tailPaddingMs?: number;
+        }
+    ) {
+        const relayUrl = await this.registerBufferedAudioRelaySource(buffer, options);
+        return this.resolveManagedAudioRelayCandidateUrls(relayUrl);
+    }
+
+    private limitAudioPlaybackCandidateUrls(urls: string[], limit = 2) {
+        const normalized = this.prioritizeAudioPlaybackCandidateUrls(
+            uniqueStrings(urls)
+        );
+        if (normalized.length <= limit) {
+            return normalized;
+        }
+
+        const selected: string[] = [];
+        const seenOrigins = new Set<string>();
+        for (const candidate of normalized) {
+            if (selected.length >= limit) {
+                break;
             }
             try {
-                const parsed = new URL(normalizedBase);
-                if (
-                    !this.config?.publicBaseUrl &&
-                    parsed.protocol === "https:" &&
-                    looksLikeIpHostname(parsed.hostname)
-                ) {
-                    parsed.protocol = "http:";
-                    candidates.push(
-                        `${parsed.toString().replace(/\/+$/, "")}/audio-relay/${relayId}${extension}`
-                    );
+                const parsed = new URL(candidate);
+                const port =
+                    parsed.port ||
+                    (parsed.protocol === "https:"
+                        ? "443"
+                        : parsed.protocol === "http:"
+                            ? "80"
+                            : "");
+                const originKey = `${parsed.protocol}//${parsed.hostname}:${port}`;
+                if (seenOrigins.has(originKey)) {
+                    continue;
                 }
-                candidates.push(
-                    `${normalizedBase.replace(/\/+$/, "")}/audio-relay/${relayId}${extension}`
-                );
+                seenOrigins.add(originKey);
             } catch {
-                continue;
+                if (selected.includes(candidate)) {
+                    continue;
+                }
             }
+            selected.push(candidate);
         }
-        return uniqueStrings(candidates);
+
+        return selected.length > 0 ? selected : normalized.slice(0, limit);
+    }
+
+    private scoreAudioPlaybackCandidateUrl(url: string) {
+        try {
+            const parsed = new URL(url);
+            const host = parsed.hostname.trim().toLowerCase();
+            const ipLikeHost =
+                looksLikeIpHostname(host) ||
+                /(?:^|\.)sslip\.io$/.test(host) ||
+                /(?:^|\.)nip\.io$/.test(host) ||
+                /(?:^|\.)xip\.io$/.test(host);
+            const secureProtocol = parsed.protocol === "https:";
+            const plainProtocol = parsed.protocol === "http:";
+            if (ipLikeHost) {
+                if (plainProtocol) {
+                    return 40;
+                }
+                if (secureProtocol) {
+                    return 10;
+                }
+                return 0;
+            }
+            if (secureProtocol) {
+                return 40;
+            }
+            if (plainProtocol) {
+                return 20;
+            }
+            return 0;
+        } catch {
+            return -10;
+        }
+    }
+
+    private prioritizeAudioPlaybackCandidateUrls(urls: string[]) {
+        return urls
+            .map((url, index) => ({
+                url,
+                index,
+                score: this.scoreAudioPlaybackCandidateUrl(url),
+            }))
+            .sort((left, right) => {
+                if (left.score !== right.score) {
+                    return right.score - left.score;
+                }
+                return left.index - right.index;
+            })
+            .map((entry) => entry.url);
     }
 
     private async buildSilentCalibrationAudioBuffer(durationMs: number) {
@@ -10424,13 +11632,12 @@ class XiaoaiCloudPlugin {
         const tailPaddingMs = this.getAudioRelayTailPaddingMs();
         const totalDurationMs = sampleDurationMs + tailPaddingMs;
         const buffer = await this.buildSilentCalibrationAudioBuffer(totalDurationMs);
-        const candidates = await this.buildBufferedAudioRelayCandidateUrls(buffer, {
+        const relayUrl = await this.registerBufferedAudioRelaySource(buffer, {
             extension: ".mp3",
             contentType: "audio/mpeg",
             sourceLabel: `audio-calibration-round-${roundNumber}`,
             tailPaddingMs,
         });
-        const relayUrl = candidates[0];
         if (!relayUrl) {
             throw new Error("静音校准音频已生成，但没有得到可供音箱访问的 relay URL。");
         }
@@ -10975,7 +12182,7 @@ class XiaoaiCloudPlugin {
 
     private async runSpeakerAudioCalibration() {
         const config = await this.loadConfig(false);
-        const { device } = await this.ensureActionContext();
+        const { device, mina } = await this.ensureActionContext();
         const tailPaddingMs = this.getAudioRelayTailPaddingMs(config);
         const rounds = AUDIO_CALIBRATION_SAMPLE_DURATIONS_MS.slice();
         const startedAt = new Date().toISOString();
@@ -11005,6 +12212,32 @@ class XiaoaiCloudPlugin {
                         consoleEventKind: "console.audio-calibration",
                         consoleEventTitle: "控制台静音校准",
                     });
+                    const playbackProfile =
+                        this.readSpeakerAudioLatencyProfile(device.minaDeviceId);
+                    const playbackDetectEstimateMs =
+                        readNumber(playbackProfile?.playbackDetectEstimateMs) || 0;
+                    const settleDelaysMs = [
+                        0,
+                        Math.max(150, Math.round(playbackDetectEstimateMs * 0.35)),
+                        Math.max(300, Math.round(playbackDetectEstimateMs * 0.7)),
+                        Math.min(2500, Math.max(700, Math.round(playbackDetectEstimateMs * 1.2))),
+                    ];
+                    for (const delayMs of settleDelaysMs) {
+                        if (delayMs > 0) {
+                            await sleep(delayMs);
+                        }
+                        const currentSnapshot =
+                            await this.readSpeakerPlaybackSnapshotWithTiming(
+                                mina,
+                                device.minaDeviceId
+                            );
+                        if (
+                            this.isSpeakerPlaybackActivelyPlaying(currentSnapshot) ||
+                            Math.max(0, readNumber(currentSnapshot?.position) || 0) > 0
+                        ) {
+                            break;
+                        }
+                    }
                     const stopped =
                         (await this.stopSpeaker({
                             fast: true,
@@ -11072,23 +12305,11 @@ class XiaoaiCloudPlugin {
     }
 
     private isHostedAudioRelayUrl(url: string) {
-        try {
-            const parsed = new URL(url);
-            return /(?:^|\/)audio-relay\/[^/]+$/i.test(parsed.pathname);
-        } catch {
-            return false;
-        }
+        return Boolean(this.parseManagedAudioRelayReference(url));
     }
 
     private parseHostedAudioRelayId(url: string) {
-        try {
-            const parsed = new URL(url);
-            const relayName = parsed.pathname.split("/").pop() || "";
-            const relayId = relayName.replace(/\.[a-z0-9]+$/i, "").trim();
-            return relayId || undefined;
-        } catch {
-            return undefined;
-        }
+        return this.parseManagedAudioRelayReference(url)?.relayId;
     }
 
     private readHostedAudioRelayEntry(url: string) {
@@ -12524,14 +13745,97 @@ class XiaoaiCloudPlugin {
         return clamp(leadMs, EXTERNAL_AUDIO_LOOP_GUARD_DEADLINE_LEAD_MS, 1800);
     }
 
+    private scoreSpeakerPlaybackSnapshot(snapshot: SpeakerPlaybackSnapshot | null) {
+        if (!snapshot) {
+            return -1;
+        }
+        let score = 0;
+        const status = readNumber(snapshot.status);
+        if (status === 1) {
+            score += 1200;
+        } else if (status === 2) {
+            score += 720;
+        } else if (status === 0) {
+            score += 120;
+        }
+        if (this.isSpeakerPlaybackActivelyPlaying(snapshot)) {
+            score += 400;
+        }
+        if (this.hasSpeakerPlaybackContext(snapshot)) {
+            score += 260;
+        }
+        const position = Math.max(0, readNumber(snapshot.position) || 0);
+        const duration = Math.max(0, readNumber(snapshot.duration) || 0);
+        if (position > 0) {
+            score += 220;
+        }
+        if (duration > 0) {
+            score += 180;
+        }
+        if (readString(snapshot.audioId)) {
+            score += 140;
+        }
+        score += Math.min(120, (snapshot.trackList || []).length * 30);
+        return score;
+    }
+
+    private pickBestSpeakerPlaybackSnapshot(
+        snapshots: Array<SpeakerPlaybackSnapshot | null>
+    ) {
+        let bestSnapshot: SpeakerPlaybackSnapshot | null = null;
+        let bestScore = -1;
+        for (const snapshot of snapshots) {
+            const score = this.scoreSpeakerPlaybackSnapshot(snapshot);
+            if (score > bestScore) {
+                bestScore = score;
+                bestSnapshot = snapshot;
+            }
+        }
+        return bestSnapshot;
+    }
+
     private async readSpeakerPlaybackSnapshotWithTiming(
         mina: MiNAClient,
-        deviceId: string
+        deviceId: string,
+        options?: {
+            timeoutMs?: number;
+            maxAttempts?: number;
+            skipMediaFallback?: boolean;
+        }
     ) {
         const startedAtMs = Date.now();
-        const snapshot = this.readSpeakerPlaybackSnapshot(
-            await mina.playerGetStatus(deviceId).catch(() => undefined)
+        let snapshot = this.readSpeakerPlaybackSnapshot(
+            await mina
+                .playerGetStatus(deviceId, {
+                    timeoutMs: options?.timeoutMs,
+                    maxAttempts: options?.maxAttempts,
+                })
+                .catch(() => undefined)
         );
+        const shouldProbeFallbackMedia =
+            options?.skipMediaFallback !== true &&
+            (!this.hasSpeakerPlaybackContext(snapshot) ||
+                this.isSpeakerPlaybackStalledQueued(snapshot));
+        if (shouldProbeFallbackMedia) {
+            const probes = await Promise.allSettled(
+                SPEAKER_STATUS_MEDIA_FALLBACK_CANDIDATES.map((media) =>
+                    mina.playerGetStatus(deviceId, {
+                        media,
+                        timeoutMs: options?.timeoutMs,
+                        maxAttempts: options?.maxAttempts,
+                    })
+                )
+            );
+            const fallbackSnapshots = probes.map((item) =>
+                item.status === "fulfilled"
+                    ? this.readSpeakerPlaybackSnapshot(item.value)
+                    : null
+            );
+            snapshot = this.pickBestSpeakerPlaybackSnapshot([
+                snapshot,
+                ...fallbackSnapshots,
+            ]);
+        }
         this.updateSpeakerAudioLatencyEstimate(
             deviceId,
             "statusProbeEstimateMs",
@@ -12631,6 +13935,11 @@ class XiaoaiCloudPlugin {
     }
 
     private async collectLocalAudioSourceCandidates(sourceUrl: string) {
+        const localSourcePath = normalizeLocalMediaPath(sourceUrl);
+        if (localSourcePath) {
+            return [localSourcePath];
+        }
+
         const normalizedSourceUrl = normalizeRemoteMediaUrl(sourceUrl);
         if (!normalizedSourceUrl) {
             return [];
@@ -12720,6 +14029,85 @@ class XiaoaiCloudPlugin {
         return uniqueStrings(candidates);
     }
 
+    private remoteAudioPreflightAcceptHeader(method: "HEAD" | "GET") {
+        return {
+            Accept: "audio/*,*/*;q=0.8",
+            ...(method === "GET" ? { Range: "bytes=0-1" } : {}),
+        };
+    }
+
+    private async preflightRemoteAudioSource(sourceUrl: string) {
+        const normalized = normalizeRemoteMediaUrl(sourceUrl);
+        if (!normalized) {
+            return;
+        }
+
+        const methods: Array<"HEAD" | "GET"> = ["HEAD", "GET"];
+        let lastError: Error | undefined;
+        for (const method of methods) {
+            try {
+                const response = await fetch(normalized, {
+                    method,
+                    redirect: "follow",
+                    headers: this.remoteAudioPreflightAcceptHeader(method),
+                    signal:
+                        typeof AbortSignal !== "undefined" &&
+                        typeof AbortSignal.timeout === "function"
+                            ? AbortSignal.timeout(AUDIO_SOURCE_PREFLIGHT_TIMEOUT_MS)
+                            : undefined,
+                });
+                if (response.body) {
+                    response.body.cancel().catch(() => undefined);
+                }
+
+                if (response.status === 404) {
+                    throw new Error("音频源链接返回 404（文件不存在或已失效）。");
+                }
+                if (response.status >= 400 && response.status < 500) {
+                    throw new Error(`音频源链接不可访问（HTTP ${response.status}）。`);
+                }
+                if (response.status >= 500) {
+                    throw new Error(`音频源服务异常（HTTP ${response.status}）。`);
+                }
+
+                const contentType = readString(response.headers.get("content-type") || undefined)
+                    ?.toLowerCase();
+                if (
+                    contentType &&
+                    !contentType.includes("audio/") &&
+                    !contentType.includes("application/octet-stream")
+                ) {
+                    throw new Error(
+                        `音频源返回内容类型不是音频：${contentType}`
+                    );
+                }
+
+                return;
+            } catch (error) {
+                const reason = this.errorMessage(error) || "unknown";
+                const normalizedReason = reason.toLowerCase();
+                if (
+                    method === "HEAD" &&
+                    (normalizedReason.includes("http 405") ||
+                        normalizedReason.includes("http 501"))
+                ) {
+                    continue;
+                }
+                lastError = new Error(
+                    `音频源预检失败（${method}）: ${reason}`
+                );
+                if (method === "HEAD") {
+                    continue;
+                }
+            }
+        }
+
+        throw (
+            lastError ||
+            new Error("音频源预检失败：无法确认该 URL 可被网关稳定访问。")
+        );
+    }
+
     private async resolveLocalAudioSourceUrl(sourceUrl: string) {
         const candidates = await this.collectLocalAudioSourceCandidates(sourceUrl);
         return candidates[0] || sourceUrl;
@@ -12798,8 +14186,18 @@ class XiaoaiCloudPlugin {
                 "mp3",
                 "-codec:a",
                 "libmp3lame",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
                 "-b:a",
-                "128k",
+                "64k",
+                "-write_xing",
+                "0",
+                "-id3v2_version",
+                "3",
+                "-map_metadata",
+                "-1",
                 "pipe:1",
             ],
             {
@@ -12943,8 +14341,18 @@ class XiaoaiCloudPlugin {
             "mp3",
             "-codec:a",
             "libmp3lame",
+            "-ar",
+            "24000",
+            "-ac",
+            "1",
             "-b:a",
-            "128k",
+            "64k",
+            "-write_xing",
+            "0",
+            "-id3v2_version",
+            "3",
+            "-map_metadata",
+            "-1",
             "pipe:1"
         );
 
@@ -13335,10 +14743,51 @@ class XiaoaiCloudPlugin {
         };
     }
 
+    private normalizeAudioPlaybackSourceUrl(url: string) {
+        const normalizedInput = normalizeAudioPlaybackInput(url);
+        if (normalizedInput) {
+            return normalizedInput;
+        }
+        const relay = this.parseManagedAudioRelayReference(url);
+        if (!relay) {
+            return undefined;
+        }
+        return this.buildManagedAudioRelayUrl(relay.relayId, relay.extension);
+    }
+
+    private async resolveSpeakerPlaybackCandidateUrls(
+        sourceUrl: string,
+        candidateUrls?: string[]
+    ) {
+        if (Array.isArray(candidateUrls) && candidateUrls.length > 0) {
+            return candidateUrls;
+        }
+        if (this.isHostedAudioRelayUrl(sourceUrl)) {
+            const resolved = (await this.resolveManagedAudioRelayCandidateUrls(sourceUrl)).filter(
+                (value) => {
+                    try {
+                        return !isLoopbackHostname(new URL(value).hostname);
+                    } catch {
+                        return false;
+                    }
+                }
+            );
+            if (resolved.length === 0) {
+                throw new Error(
+                    "当前没有可供音箱访问的音频入口。请配置 audioPublicBaseUrl，或让 OpenClaw 网关通过局域网地址可被音箱直接访问。"
+                );
+            }
+            return resolved;
+        }
+        const normalized = normalizeRemoteMediaUrl(sourceUrl);
+        return normalized ? [normalized] : [];
+    }
+
     private async prepareSpeakerAudioSource(
         sourceUrl: string,
         options?: { title?: string }
     ): Promise<PreparedSpeakerAudioSource> {
+        const localSourcePath = normalizeLocalMediaPath(sourceUrl);
         if (this.isHostedAudioRelayUrl(sourceUrl)) {
             const hostedRelayEntry = await this.ensureHostedAudioRelayEntry(sourceUrl);
             if (!hostedRelayEntry || hostedRelayEntry.expiresAtMs <= Date.now()) {
@@ -13355,13 +14804,27 @@ class XiaoaiCloudPlugin {
             };
         }
 
+        if (!localSourcePath) {
+            try {
+                await this.preflightRemoteAudioSource(sourceUrl);
+            } catch (error) {
+                const message = this.errorMessage(error);
+                await this.appendDebugTrace("audio_source_preflight_failed", {
+                    sourceUrl,
+                    title: options?.title,
+                    reason: message,
+                });
+                throw new Error(message);
+            }
+        }
+
         const tailPaddingMs = this.getAudioRelayTailPaddingMs();
         try {
             const standardizedBuffer = await this.transcodeRemoteAudioToMp3Buffer(
                 sourceUrl,
                 tailPaddingMs
             );
-            const relayUrls = await this.buildBufferedAudioRelayCandidateUrls(
+            const relayUrl = await this.registerBufferedAudioRelaySource(
                 standardizedBuffer,
                 {
                     extension: ".mp3",
@@ -13370,11 +14833,11 @@ class XiaoaiCloudPlugin {
                     tailPaddingMs,
                 }
             );
-            if (relayUrls.length === 0) {
+            if (!relayUrl) {
                 throw new Error("没有可用的本地音频 relay 地址。");
             }
             return {
-                playbackUrl: relayUrls[0],
+                playbackUrl: relayUrl,
                 standardized: true,
             };
         } catch (error) {
@@ -13384,6 +14847,11 @@ class XiaoaiCloudPlugin {
                 title: options?.title,
                 reason: message,
             });
+            if (localSourcePath) {
+                throw new Error(
+                    `本地音频文件标准化失败，无法直接让音箱访问本机路径：${message}`
+                );
+            }
             return {
                 playbackUrl: sourceUrl,
                 standardized: false,
@@ -13542,16 +15010,16 @@ class XiaoaiCloudPlugin {
             );
         }
         const generated = await this.getOrCreateOpenclawTtsAsset(text);
-        const relayUrls = await this.buildBufferedAudioRelayCandidateUrls(generated.audioBuffer, {
+        const relayUrl = await this.registerBufferedAudioRelaySource(generated.audioBuffer, {
             extension: generated.audioExtension,
             contentType: contentTypeForAudioExtension(generated.audioExtension),
             sourceLabel: this.normalizeAudioReplyTitle(options?.title) || text,
             tailPaddingMs: this.getAudioRelayTailPaddingMs(),
         });
-        if (relayUrls.length === 0) {
+        if (!relayUrl) {
             throw new Error("TTS 桥接失败：没有可用的本地音频 relay 地址。");
         }
-        return relayUrls[0];
+        return relayUrl;
     }
 
     private async finalizeSpokenToolReply(
@@ -13589,19 +15057,34 @@ class XiaoaiCloudPlugin {
         });
     }
 
-    private generateExternalAudioId() {
-        const digits = Array.from(randomBytes(12))
-            .map((value) => String(value % 10))
-            .join("")
-            .replace(/^0+/, "1");
-        return digits.padEnd(19, "7").slice(0, 19);
+    private shouldUseBlankExternalAudioType(hardware?: string) {
+        const normalizedHardware = readString(hardware)?.trim().toUpperCase();
+        return Boolean(
+            normalizedHardware &&
+                EXTERNAL_AUDIO_EMPTY_TYPE_HARDWARE.has(normalizedHardware)
+        );
+    }
+
+    private createExternalAudioRequestId() {
+        const entropy = String(
+            randomBytes(4).readUInt32BE(0) % 1_000_000
+        ).padStart(6, "0");
+        return `${Date.now()}${entropy}`;
     }
 
     private buildExternalAudioMusicRequest(
         url: string,
-        title?: string
+        title?: string,
+        options?: {
+            audioId?: string;
+            audioType?: string;
+            hardware?: string;
+        }
     ): ExternalAudioMusicRequest {
-        const expectedAudioId = this.generateExternalAudioId();
+        const expectedAudioId =
+            readString(options?.audioId) || EXTERNAL_AUDIO_DEFAULT_ID;
+        const audioType = readString(options?.audioType)
+            ?? (this.shouldUseBlankExternalAudioType(options?.hardware) ? "" : "MUSIC");
         const item: Record<string, any> = {
             item_id: {
                 audio_id: expectedAudioId,
@@ -13616,17 +15099,14 @@ class XiaoaiCloudPlugin {
                 url,
             },
         };
-        const normalizedTitle = this.normalizeAudioReplyTitle(title);
-        if (normalizedTitle) {
-            item.text = normalizedTitle;
-        }
         return {
             expectedAudioId,
+            audioType,
             data: {
                 startaudioid: expectedAudioId,
                 music: JSON.stringify({
                     payload: {
-                        audio_type: "MUSIC",
+                        audio_type: audioType,
                         audio_items: [item],
                         list_params: {
                             listId: "-1",
@@ -13641,26 +15121,161 @@ class XiaoaiCloudPlugin {
         };
     }
 
+    private buildExternalAudioMusicRequestVariants(
+        url: string,
+        title?: string,
+        options?: {
+            audioId?: string;
+            audioType?: string;
+            hardware?: string;
+        }
+    ) {
+        const explicitAudioType = readString(options?.audioType);
+        if (explicitAudioType !== undefined) {
+            return [
+                this.buildExternalAudioMusicRequest(url, title, {
+                    ...options,
+                    audioType: explicitAudioType,
+                }),
+            ];
+        }
+
+        const preferBlankAudioType = this.shouldUseBlankExternalAudioType(
+            options?.hardware
+        );
+        const candidateAudioTypes = preferBlankAudioType
+            ? ["", "MUSIC"]
+            : ["MUSIC", ""];
+        const requests: ExternalAudioMusicRequest[] = [];
+        const seenAudioTypeKeys = new Set<string>();
+
+        for (const candidateAudioType of candidateAudioTypes) {
+            const audioTypeKey = candidateAudioType || "__blank__";
+            if (seenAudioTypeKeys.has(audioTypeKey)) {
+                continue;
+            }
+            seenAudioTypeKeys.add(audioTypeKey);
+            requests.push(
+                this.buildExternalAudioMusicRequest(url, title, {
+                    ...options,
+                    audioType: candidateAudioType,
+                })
+            );
+        }
+
+        return requests;
+    }
+
+    private shouldTreatAudioPlaybackAsPending(
+        attempt: Record<string, any> | undefined
+    ) {
+        if (!attempt || attempt.started === true) {
+            return false;
+        }
+        const relayHitObserved = attempt.relayHitObserved === true;
+        if (!relayHitObserved) {
+            return false;
+        }
+
+        const expectedAudioId = readString(attempt.expectedAudioId);
+        const relayHitCount = Math.max(0, readNumber(attempt.relayHitCount) || 0);
+        const minimumRelayHitCount = expectedAudioId ? 1 : 2;
+        if (relayHitCount < minimumRelayHitCount) {
+            return false;
+        }
+
+        const rawSnapshot =
+            attempt.rawSnapshot && typeof attempt.rawSnapshot === "object"
+                ? (attempt.rawSnapshot as SpeakerPlaybackSnapshot)
+                : attempt.snapshot && typeof attempt.snapshot === "object"
+                  ? (attempt.snapshot as SpeakerPlaybackSnapshot)
+                  : null;
+
+        if (!rawSnapshot) {
+            return false;
+        }
+
+        if (attempt.placeholderObserved === true) {
+            if (expectedAudioId && !this.speakerSnapshotHasAudioId(rawSnapshot, expectedAudioId)) {
+                return false;
+            }
+            return true;
+        }
+
+        return this.isExternalAudioPlaceholderSnapshot(rawSnapshot, expectedAudioId);
+    }
+
     private readAudioRelayUsageForUrl(url: string) {
-        try {
-            const parsed = new URL(url);
-            const relayName = parsed.pathname.split("/").pop() || "";
-            const relayId = relayName.replace(/\.[a-z0-9]+$/i, "").trim();
-            if (!relayId) {
-                return null;
-            }
-            const entry = this.audioRelayEntries.get(relayId);
-            if (!entry) {
-                return null;
-            }
-            return {
-                relayId,
-                hitCount: entry.hitCount,
-                lastHitAtMs: entry.lastHitAtMs,
-            };
-        } catch {
+        const relay = this.parseManagedAudioRelayReference(url);
+        if (!relay) {
             return null;
         }
+        const entry = this.audioRelayEntries.get(relay.relayId);
+        const sharedUsage = this.readSharedAudioRelayUsage(relay.relayId);
+        if (
+            entry &&
+            sharedUsage &&
+            sharedUsage.hitCount > Math.max(0, entry.hitCount || 0)
+        ) {
+            entry.hitCount = sharedUsage.hitCount;
+            if (
+                typeof sharedUsage.lastHitAtMs === "number" &&
+                sharedUsage.lastHitAtMs > Math.max(0, entry.lastHitAtMs || 0)
+            ) {
+                entry.lastHitAtMs = sharedUsage.lastHitAtMs;
+                entry.lastHitAddress =
+                    readString(sharedUsage.lastHitAddress) || entry.lastHitAddress;
+            }
+        }
+        if (!entry && !sharedUsage) {
+            return null;
+        }
+        return {
+            relayId: relay.relayId,
+            hitCount: Math.max(
+                0,
+                Math.round(
+                    Math.max(entry?.hitCount || 0, sharedUsage?.hitCount || 0)
+                )
+            ),
+            lastHitAtMs:
+                Math.max(
+                    0,
+                    Math.round(
+                        Math.max(entry?.lastHitAtMs || 0, sharedUsage?.lastHitAtMs || 0)
+                    )
+                ) || undefined,
+        };
+    }
+
+    private rememberResolvedAudioRelayCandidate(
+        candidateUrl: string,
+        relayUrl: string
+    ) {
+        const normalizedCandidate = normalizeRemoteMediaUrl(candidateUrl);
+        if (!normalizedCandidate || !this.isHostedAudioRelayUrl(relayUrl)) {
+            return;
+        }
+        this.resolvedAudioRelayCandidates.delete(normalizedCandidate);
+        this.resolvedAudioRelayCandidates.set(normalizedCandidate, relayUrl);
+        while (this.resolvedAudioRelayCandidates.size > 512) {
+            const oldest = this.resolvedAudioRelayCandidates.keys().next().value;
+            if (!oldest) {
+                break;
+            }
+            this.resolvedAudioRelayCandidates.delete(oldest);
+        }
+    }
+
+    private resolveHostedAudioRelayForCandidateUrl(url: string) {
+        if (this.isHostedAudioRelayUrl(url)) {
+            return url;
+        }
+        const normalized = normalizeRemoteMediaUrl(url);
+        if (!normalized) {
+            return undefined;
+        }
+        return this.resolvedAudioRelayCandidates.get(normalized);
     }
 
     private async handleAudioRelayMp3TranscodeRoute(
@@ -13681,10 +15296,11 @@ class XiaoaiCloudPlugin {
         }
 
         response.statusCode = 200;
-        applySecurityHeaders(response);
-        response.setHeader("Content-Type", "audio/mpeg");
-        response.setHeader("Accept-Ranges", "none");
-        response.setHeader("Vary", "Accept");
+        applyAudioRelayHeaders(response, "audio/mpeg", {
+            acceptRanges: "none",
+            vary: "Accept",
+            modifiedAtMs: entry.createdAtMs || Date.now(),
+        });
 
         if (requestMethod === "HEAD") {
             response.end();
@@ -13707,8 +15323,18 @@ class XiaoaiCloudPlugin {
                 "mp3",
                 "-codec:a",
                 "libmp3lame",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
                 "-b:a",
-                "128k",
+                "64k",
+                "-write_xing",
+                "0",
+                "-id3v2_version",
+                "3",
+                "-map_metadata",
+                "-1",
                 "pipe:1",
             ],
             {
@@ -13794,6 +15420,7 @@ class XiaoaiCloudPlugin {
     private async handleBufferedAudioRelayRoute(
         request: any,
         response: any,
+        relayId: string,
         entry: AudioRelayEntry,
         requestMethod: string
     ) {
@@ -13808,14 +15435,22 @@ class XiaoaiCloudPlugin {
             return true;
         }
         entry.buffer = buffer;
-
-        applySecurityHeaders(response);
-        response.setHeader(
-            "Content-Type",
-            entry.contentType || contentTypeForAudioExtension(entry.extension)
+        const modifiedAtMs = Math.max(
+            1,
+            Math.floor(entry.lastHitAtMs || entry.createdAtMs || Date.now())
         );
-        response.setHeader("Accept-Ranges", "bytes");
-        response.setHeader("Vary", "Range, Accept");
+        const etag = buildAudioRelayWeakEtag(relayId, buffer.length, modifiedAtMs);
+
+        applyAudioRelayHeaders(
+            response,
+            entry.contentType || contentTypeForAudioExtension(entry.extension),
+            {
+                acceptRanges: "bytes",
+                vary: "Range, Accept",
+                etag,
+                modifiedAtMs,
+            }
+        );
 
         const rangeHeader = readRequestHeader(request, "range");
         if (rangeHeader) {
@@ -13825,6 +15460,26 @@ class XiaoaiCloudPlugin {
                 return true;
             }
             const total = buffer.length;
+            if (this.shouldServeInitialRangeRequestAsFullResponse(rangeHeader)) {
+                response.statusCode = 200;
+                response.setHeader("Content-Length", String(total));
+                if (requestMethod === "HEAD") {
+                    response.end();
+                } else {
+                    response.end(buffer);
+                }
+                await this.traceAudioRelayServe(relayId, entry, {
+                    requestMethod,
+                    rangeHeader,
+                    responseStatus: 200,
+                    totalBytes: total,
+                    servedBytes: total,
+                    servedStart: 0,
+                    servedEnd: total - 1,
+                    servedAsFullResponse: true,
+                });
+                return true;
+            }
             let start = matched[1] ? Number(matched[1]) : 0;
             let end = matched[2] ? Number(matched[2]) : total - 1;
             if (!matched[1] && matched[2]) {
@@ -13850,9 +15505,18 @@ class XiaoaiCloudPlugin {
             response.setHeader("Content-Range", `bytes ${start}-${boundedEnd}/${total}`);
             if (requestMethod === "HEAD") {
                 response.end();
-                return true;
+            } else {
+                response.end(chunk);
             }
-            response.end(chunk);
+            await this.traceAudioRelayServe(relayId, entry, {
+                requestMethod,
+                rangeHeader,
+                responseStatus: 206,
+                totalBytes: total,
+                servedBytes: chunk.length,
+                servedStart: start,
+                servedEnd: boundedEnd,
+            });
             return true;
         }
 
@@ -13860,9 +15524,18 @@ class XiaoaiCloudPlugin {
         response.setHeader("Content-Length", String(buffer.length));
         if (requestMethod === "HEAD") {
             response.end();
-            return true;
+        } else {
+            response.end(buffer);
         }
-        response.end(buffer);
+        await this.traceAudioRelayServe(relayId, entry, {
+            requestMethod,
+            responseStatus: 200,
+            totalBytes: buffer.length,
+            servedBytes: buffer.length,
+            servedStart: 0,
+            servedEnd: buffer.length - 1,
+            servedAsFullResponse: true,
+        });
         return true;
     }
 
@@ -13902,17 +15575,42 @@ class XiaoaiCloudPlugin {
             return true;
         }
 
-        entry.hitCount += 1;
+        const previousSharedUsage = this.readSharedAudioRelayUsage(relayId);
+        const nextHitCount =
+            Math.max(
+                0,
+                Math.round(
+                    Math.max(
+                        entry.hitCount || 0,
+                        previousSharedUsage?.hitCount || 0
+                    )
+                )
+            ) + 1;
+        entry.hitCount = nextHitCount;
         entry.lastHitAtMs = Date.now();
+        entry.expiresAtMs = Date.now() + AUDIO_RELAY_TTL_MS;
         entry.lastHitAddress =
             readString(readRequestHeader(request, "x-forwarded-for")) ||
             readString(request?.socket?.remoteAddress) ||
             undefined;
+        if (entry.filePath) {
+            const touchedAt = new Date(entry.lastHitAtMs);
+            utimes(entry.filePath, touchedAt, touchedAt).catch(() => undefined);
+        }
+        this.rememberSharedAudioRelayUsage(relayId, {
+            hitCount: nextHitCount,
+            lastHitAtMs: entry.lastHitAtMs,
+            lastHitAddress: entry.lastHitAddress,
+        });
         if (entry.hitCount === 1) {
             void this.appendDebugTrace("audio_relay_hit", {
                 relayId,
                 sourceUrl: entry.sourceUrl || entry.sourceLabel,
                 remoteAddress: entry.lastHitAddress,
+                requestMethod,
+                host: readRequestHeader(request, "host") || undefined,
+                rangeHeader: readRequestHeader(request, "range") || undefined,
+                userAgent: readRequestHeader(request, "user-agent") || undefined,
                 buffered: Buffer.isBuffer(entry.buffer) || Boolean(entry.filePath),
                 transcodeToMp3: entry.transcodeToMp3 === true,
             });
@@ -13922,6 +15620,7 @@ class XiaoaiCloudPlugin {
             return this.handleBufferedAudioRelayRoute(
                 request,
                 response,
+                relayId,
                 entry,
                 requestMethod
             );
@@ -13948,7 +15647,7 @@ class XiaoaiCloudPlugin {
             };
             const rangeHeader = readRequestHeader(request, "range");
             const ifRangeHeader = readRequestHeader(request, "if-range");
-            if (rangeHeader) {
+            if (rangeHeader && !this.shouldServeInitialRangeRequestAsFullResponse(rangeHeader)) {
                 requestHeaders.Range = rangeHeader;
             }
             if (ifRangeHeader) {
@@ -13974,23 +15673,24 @@ class XiaoaiCloudPlugin {
         }
 
         response.statusCode = upstream.status || 200;
-        applySecurityHeaders(response);
         const contentType = readString(upstream.headers.get("content-type") || undefined);
-        response.setHeader(
-            "Content-Type",
+        applyAudioRelayHeaders(
+            response,
             contentType && contentType.toLowerCase().includes("audio/")
                 ? contentType
-                : contentTypeForAudioExtension(entry.extension)
+                : contentTypeForAudioExtension(entry.extension),
+            {
+                acceptRanges:
+                    readString(upstream.headers.get("accept-ranges") || undefined) === "none"
+                        ? "none"
+                        : "bytes",
+                vary: "Range, Accept",
+            }
         );
         const contentRange = readString(upstream.headers.get("content-range") || undefined);
         if (contentRange) {
             response.setHeader("Content-Range", contentRange);
         }
-        response.setHeader(
-            "Accept-Ranges",
-            readString(upstream.headers.get("accept-ranges") || undefined) || "bytes"
-        );
-        response.setHeader("Vary", "Range, Accept");
         const etag = readString(upstream.headers.get("etag") || undefined);
         if (etag) {
             response.setHeader("ETag", etag);
@@ -14010,6 +15710,23 @@ class XiaoaiCloudPlugin {
 
         if (requestMethod === "HEAD") {
             response.end();
+            await this.traceAudioRelayServe(relayId, entry, {
+                requestMethod,
+                rangeHeader: readRequestHeader(request, "range") || undefined,
+                responseStatus: upstream.status || 200,
+                totalBytes:
+                    typeof contentLength === "number" && contentLength > 0
+                        ? contentLength
+                        : 0,
+                servedBytes: 0,
+                servedAsFullResponse:
+                    !Boolean(
+                        readRequestHeader(request, "range") &&
+                            !this.shouldServeInitialRangeRequestAsFullResponse(
+                                readRequestHeader(request, "range") || undefined
+                            )
+                    ),
+            });
             return true;
         }
 
@@ -14025,6 +15742,23 @@ class XiaoaiCloudPlugin {
                 response.write(nextChunk);
             }
             response.end();
+            await this.traceAudioRelayServe(relayId, entry, {
+                requestMethod,
+                rangeHeader: readRequestHeader(request, "range") || undefined,
+                responseStatus: upstream.status || 200,
+                totalBytes:
+                    typeof contentLength === "number" && contentLength > 0
+                        ? contentLength
+                        : totalBytes,
+                servedBytes: totalBytes,
+                servedAsFullResponse:
+                    !Boolean(
+                        readRequestHeader(request, "range") &&
+                            !this.shouldServeInitialRangeRequestAsFullResponse(
+                                readRequestHeader(request, "range") || undefined
+                            )
+                    ),
+            });
         } catch (error) {
             if (!response.writableEnded) {
                 response.destroy(error instanceof Error ? error : undefined);
@@ -14044,15 +15778,22 @@ class XiaoaiCloudPlugin {
             consoleEventTitle?: string;
         }
     ) {
-        const requestedUrl = normalizeRemoteMediaUrl(url);
+        const requestedUrl = this.normalizeAudioPlaybackSourceUrl(url);
         if (!requestedUrl) {
-            throw new Error("只支持可直接访问的 http/https 音频 URL。");
+            throw new Error("只支持可直接访问的 http/https 音频 URL，或插件内部已注册的音频 relay。");
         }
+        const capabilityUrl = normalizeRemoteMediaUrl(requestedUrl) || requestedUrl;
 
         const { device, mina } = await this.ensureActionContext();
-        const initialBeforePlayback = await this.readSpeakerPlaybackSnapshotWithTiming(
-            mina,
-            device.minaDeviceId
+        const initialBeforePlayback = this.sanitizeSpeakerPlaybackBaseline(
+            await this.readSpeakerPlaybackSnapshotWithTiming(
+                mina,
+                device.minaDeviceId,
+                {
+                    timeoutMs: AUDIO_PLAYBACK_FAST_STATUS_TIMEOUT_MS,
+                    maxAttempts: AUDIO_PLAYBACK_FAST_STATUS_MAX_ATTEMPTS,
+                }
+            )
         );
         const shouldInterruptCurrentPlayback =
             options?.interrupt !== false &&
@@ -14060,7 +15801,7 @@ class XiaoaiCloudPlugin {
                 initialBeforePlayback &&
                     !this.isSpeakerPlaybackPausedOrStopped(initialBeforePlayback)
             );
-        const cachedCapability = this.readAudioPlaybackCapability(device, requestedUrl);
+        const cachedCapability = this.readAudioPlaybackCapability(device, capabilityUrl);
         const nowMs = Date.now();
         if (
             options?.ignoreRecentFailure !== true &&
@@ -14072,7 +15813,7 @@ class XiaoaiCloudPlugin {
                 Math.ceil((cachedCapability.skipSpeakerUntilMs - nowMs) / 1000)
             );
             await this.appendDebugTrace("audio_playback_skip_recent_failure", {
-                host: mediaUrlHostKey(requestedUrl),
+                host: mediaUrlHostKey(capabilityUrl),
                 skipRemainingSeconds: remainingSeconds,
                 preferredStrategy: cachedCapability.preferredStrategy,
             });
@@ -14081,57 +15822,56 @@ class XiaoaiCloudPlugin {
             );
         }
 
-        if (shouldInterruptCurrentPlayback) {
-            await this.pauseSpeaker().catch(() => false);
-        }
-
         const inheritedLoopRestoreType = this.readExternalAudioLoopGuard(
             device.minaDeviceId
         )?.restoreLoopType;
-        const beforePlayback = shouldInterruptCurrentPlayback
-            ? (await this.readSpeakerPlaybackSnapshotWithTiming(
-                mina,
-                device.minaDeviceId
-            )) || initialBeforePlayback
-            : initialBeforePlayback;
-        const beforePlaybackLoopType = readNumber(beforePlayback?.loopType);
-        let externalAudioLoopTypeForced = false;
-        if (
-            typeof beforePlaybackLoopType === "number" &&
-            beforePlaybackLoopType !== EXTERNAL_AUDIO_NON_LOOP_TYPE
-        ) {
-            externalAudioLoopTypeForced = await this.setSpeakerLoopType(
-                mina,
-                device.minaDeviceId,
-                EXTERNAL_AUDIO_NON_LOOP_TYPE,
-                "pre-playback",
-                {
-                    requestedUrl,
-                    title: options?.title,
-                    previousLoopType: beforePlaybackLoopType,
-                }
-            ).catch(() => false);
-        }
         const preparedSource = await this.prepareSpeakerAudioSource(requestedUrl, {
             title: options?.title,
         });
+        if (shouldInterruptCurrentPlayback) {
+            await this.pauseSpeaker().catch(() => false);
+        }
+        const beforePlayback = this.sanitizeSpeakerPlaybackBaseline(
+            shouldInterruptCurrentPlayback
+                ? (await this.readSpeakerPlaybackSnapshotWithTiming(
+                    mina,
+                    device.minaDeviceId,
+                    {
+                        timeoutMs: AUDIO_PLAYBACK_FAST_STATUS_TIMEOUT_MS,
+                        maxAttempts: AUDIO_PLAYBACK_FAST_STATUS_MAX_ATTEMPTS,
+                    }
+                )) || initialBeforePlayback
+                : initialBeforePlayback
+        );
+        const beforePlaybackLoopType = readNumber(beforePlayback?.loopType);
         const speakerUrl = preparedSource.playbackUrl;
         const allowRelayStrategies = !this.isHostedAudioRelayUrl(speakerUrl);
         let relayCandidateUrls: string[] | undefined;
         let relayTranscodeCandidateUrls: string[] | undefined;
         const preferRelay =
             allowRelayStrategies &&
-            this.shouldPreferRelayAudioUrl(requestedUrl);
+            this.shouldPreferRelayAudioUrl(capabilityUrl);
         const preferMusic = this.shouldPreferStructuredMusic(speakerUrl);
         const canTranscodeToMp3 =
             allowRelayStrategies && (await this.probeFfmpegAvailability());
-        const preferMp3Relay = canTranscodeToMp3 && this.shouldPreferMp3Relay(requestedUrl);
+        const preferMp3Relay = canTranscodeToMp3 && this.shouldPreferMp3Relay(capabilityUrl);
         const strategies = this.orderAudioPlaybackStrategies(cachedCapability?.preferredStrategy, {
             preferRelay,
             preferMusic,
             allowMp3Relay: canTranscodeToMp3,
             preferMp3Relay,
         }).filter((strategy) => allowRelayStrategies || !strategy.startsWith("relay"));
+        const originalCandidateUrls = this.limitAudioPlaybackCandidateUrls(
+            uniqueStrings(
+                await this.resolveSpeakerPlaybackCandidateUrls(
+                    speakerUrl,
+                    preparedSource.playbackUrlCandidates
+                )
+            )
+        );
+        const originalMusicCandidateUrls = originalCandidateUrls.slice(0, 2);
+        const originalDirectCandidateUrls = originalCandidateUrls.slice(0, 2);
+        const externalAudioRequestId = this.createExternalAudioRequestId();
 
         let startedWithUrl: string | undefined;
         let usedStrategy: AudioPlaybackStrategy | undefined;
@@ -14139,7 +15879,31 @@ class XiaoaiCloudPlugin {
         let loopGuardAudioId: string | undefined;
         let playbackAcceptedAtMs: number | undefined;
         let playbackObservedAtMs: number | undefined;
+        let hostedRelayFetchedWithoutPlayback = false;
+        let pendingPlayback:
+            | {
+                  startedWithUrl: string;
+                  expectedAudioId?: string;
+                  strategy: AudioPlaybackStrategy;
+                  rawSnapshot?: SpeakerPlaybackSnapshot | null;
+                  relayUsageUrl?: string;
+                  relayHitObserved?: boolean;
+                  relayHitCount?: number;
+              }
+            | undefined;
         const attemptDiagnostics: Record<string, any>[] = [];
+        const resetSpeakerBeforeAudioRetry = async () => {
+            const fastStopped = await this.stopSpeaker({
+                fast: true,
+                preserveLoopGuard: false,
+            }).catch(() => false);
+            if (!fastStopped) {
+                await this.stopSpeaker({
+                    preserveLoopGuard: false,
+                }).catch(() => false);
+            }
+            await sleep(180);
+        };
 
         strategyLoop:
         for (const strategy of strategies) {
@@ -14147,147 +15911,409 @@ class XiaoaiCloudPlugin {
                 strategy === "relay-music-mp3" || strategy === "relay-direct-mp3"
                     ? relayTranscodeCandidateUrls ||
                         (relayTranscodeCandidateUrls = await this.buildAudioRelayCandidateUrls(
-                            requestedUrl,
+                            capabilityUrl,
                             { transcodeToMp3: true }
                         ))
                     : strategy.startsWith("relay")
                     ? relayCandidateUrls ||
-                        (relayCandidateUrls = await this.buildAudioRelayCandidateUrls(requestedUrl))
-                    : [speakerUrl];
+                        (relayCandidateUrls = await this.buildAudioRelayCandidateUrls(capabilityUrl))
+                    : strategy === "original-direct"
+                    ? originalDirectCandidateUrls
+                    : originalMusicCandidateUrls;
 
             for (const candidateUrl of candidateUrls) {
-                const relayUsageBefore = this.isHostedAudioRelayUrl(candidateUrl)
-                    ? this.readAudioRelayUsageForUrl(candidateUrl)
-                    : strategy.startsWith("relay")
-                    ? this.readAudioRelayUsageForUrl(candidateUrl)
+                const relayUsageUrl = this.isHostedAudioRelayUrl(speakerUrl)
+                    ? speakerUrl
+                    : this.resolveHostedAudioRelayForCandidateUrl(candidateUrl);
+                const relayUsageBefore = relayUsageUrl
+                    ? this.readAudioRelayUsageForUrl(relayUsageUrl)
                     : null;
-                const candidateHostedRelayEntry = relayUsageBefore
-                    ? this.readHostedAudioRelayEntry(candidateUrl)
+                const candidateHostedRelayEntry = relayUsageUrl
+                    ? this.readHostedAudioRelayEntry(relayUsageUrl)
                     : undefined;
+                const candidateUsesHostedRelay = Boolean(relayUsageUrl);
                 const allowRelayHitStart = this.isHostedBufferedRelayEntry(
                     candidateHostedRelayEntry
                 );
 
                 if (strategy.endsWith("direct")) {
-                    const direct = await mina.playerPlayUrl(device.minaDeviceId, candidateUrl, 1);
-                    const directAcceptedAtMs = Date.now();
-                    const directCode = Number((direct as any)?.code);
-                    const directOk = Number.isFinite(directCode) ? directCode === 0 : true;
+                    const directTypes = Array.from(
+                        new Set([EXTERNAL_AUDIO_STATIC_PLAY_TYPE, 1])
+                    );
+                    for (const directType of directTypes) {
+                        for (const media of SPEAKER_PLAY_URL_MEDIA_CANDIDATES) {
+                            const direct = await mina.playerPlayUrl(
+                                device.minaDeviceId,
+                                candidateUrl,
+                                directType,
+                                { media }
+                            );
+                            const directAcceptedAtMs = Date.now();
+                            const directCode = Number((direct as any)?.code);
+                            const directOk = Number.isFinite(directCode)
+                                ? directCode === 0
+                                : true;
+                            const attempt: Record<string, any> = {
+                                strategy,
+                                candidateUrl,
+                                directType,
+                                media,
+                                directCode,
+                                relayHitCountBefore: relayUsageBefore?.hitCount,
+                            };
+                            if (!directOk) {
+                                attempt.error = "cloud_rejected";
+                                attemptDiagnostics.push(attempt);
+                                continue;
+                            }
+                            const directVerify = await this.verifySpeakerPlaybackStarted(
+                                mina,
+                                device.minaDeviceId,
+                                beforePlayback,
+                                {
+                                    relayUrl: relayUsageUrl,
+                                    relayHitCount: relayUsageBefore?.hitCount,
+                                    allowRelayHitStart,
+                                }
+                            );
+                            attempt.started = directVerify.started;
+                            attempt.startedByRelayHit = directVerify.startedByRelayHit;
+                            attempt.startedByRelayHitReason =
+                                directVerify.startedByRelayHitReason;
+                            attempt.relayHitObserved = directVerify.relayHitObserved;
+                            attempt.relayHitCount = directVerify.relayHitCount;
+                            attempt.bootstrapObserved = directVerify.bootstrapObserved;
+                            attempt.bootstrapReason = directVerify.bootstrapReason;
+                            attempt.snapshot = directVerify.snapshot;
+                            attempt.rawSnapshot = directVerify.rawSnapshot;
+                            attempt.placeholderObserved = directVerify.placeholderObserved;
+                            attemptDiagnostics.push(attempt);
+                            const relayHitBootstrapPending =
+                                candidateUsesHostedRelay &&
+                                directVerify.startedByRelayHit === true &&
+                                this.isSpeakerPlaybackZeroProgress(
+                                    directVerify.snapshot
+                                );
+                            if (relayHitBootstrapPending) {
+                                attempt.error = "relay_hit_pending_start";
+                                pendingPlayback = {
+                                    startedWithUrl: candidateUrl,
+                                    strategy,
+                                    rawSnapshot: directVerify.rawSnapshot,
+                                    relayUsageUrl: relayUsageUrl || undefined,
+                                    relayHitObserved: directVerify.relayHitObserved,
+                                    relayHitCount: directVerify.relayHitCount,
+                                };
+                                break strategyLoop;
+                            }
+                            if (
+                                candidateUsesHostedRelay &&
+                                this.shouldTreatAudioPlaybackAsPending(attempt)
+                            ) {
+                                pendingPlayback = {
+                                    startedWithUrl: candidateUrl,
+                                    strategy,
+                                    rawSnapshot: directVerify.rawSnapshot,
+                                    relayUsageUrl: relayUsageUrl || undefined,
+                                    relayHitObserved: directVerify.relayHitObserved,
+                                    relayHitCount: directVerify.relayHitCount,
+                                };
+                                break strategyLoop;
+                            }
+                            if (directVerify.started) {
+                                startedWithUrl = candidateUrl;
+                                usedStrategy = strategy;
+                                verifyResult = directVerify;
+                                playbackAcceptedAtMs = directAcceptedAtMs;
+                                playbackObservedAtMs = Date.now();
+                                loopGuardAudioId = directVerify.startedByRelayHit
+                                    ? undefined
+                                    : readString(directVerify.snapshot?.audioId);
+                                break strategyLoop;
+                            }
+                            if (directVerify.bootstrapObserved) {
+                                attempt.error = "bootstrap_timed_out";
+                                if (
+                                    !candidateUsesHostedRelay ||
+                                    directVerify.relayHitObserved
+                                ) {
+                                    break strategyLoop;
+                                }
+                                await resetSpeakerBeforeAudioRetry();
+                                continue;
+                            }
+                            if (
+                                candidateUsesHostedRelay &&
+                                directVerify.relayHitObserved &&
+                                this.isSpeakerPlaybackStalledQueued(directVerify.snapshot)
+                            ) {
+                                hostedRelayFetchedWithoutPlayback = true;
+                                attempt.error = "relay_fetched_without_playback";
+                                await resetSpeakerBeforeAudioRetry();
+                                continue;
+                            }
+                            await resetSpeakerBeforeAudioRetry();
+                        }
+                    }
+                    continue;
+                }
+
+                const musicRequests = this.buildExternalAudioMusicRequestVariants(
+                    candidateUrl,
+                    options?.title,
+                    {
+                        audioId: externalAudioRequestId,
+                        hardware: device.hardware,
+                    }
+                );
+                for (
+                    let musicRequestIndex = 0;
+                    musicRequestIndex < musicRequests.length;
+                    musicRequestIndex += 1
+                ) {
+                    const musicRequest = musicRequests[musicRequestIndex];
+                    const hasAlternateAudioType =
+                        musicRequestIndex < musicRequests.length - 1;
+                    const fallback = await mina.playerPlayMusic(
+                        device.minaDeviceId,
+                        musicRequest.data
+                    );
+                    const fallbackAcceptedAtMs = Date.now();
+                    const fallbackCode = Number((fallback as any)?.code);
+                    const fallbackOk = Number.isFinite(fallbackCode)
+                        ? fallbackCode === 0
+                        : true;
                     const attempt: Record<string, any> = {
                         strategy,
                         candidateUrl,
-                        directCode,
+                        fallbackCode,
+                        expectedAudioId: musicRequest.expectedAudioId,
+                        audioType: musicRequest.audioType,
+                        audioTypeAttempt: musicRequestIndex + 1,
                         relayHitCountBefore: relayUsageBefore?.hitCount,
+                        transcodeToMp3: strategy === "relay-music-mp3",
                     };
-                    if (!directOk) {
+                    if (!fallbackOk) {
                         attempt.error = "cloud_rejected";
                         attemptDiagnostics.push(attempt);
-                        continue;
+                        if (hasAlternateAudioType) {
+                            continue;
+                        }
+                        break;
                     }
-                    const directVerify = await this.verifySpeakerPlaybackStarted(
+                    const fallbackVerify = await this.verifySpeakerPlaybackStarted(
                         mina,
                         device.minaDeviceId,
                         beforePlayback,
                         {
-                            relayUrl: relayUsageBefore ? candidateUrl : undefined,
+                            expectedAudioId: musicRequest.expectedAudioId,
+                            relayUrl: relayUsageUrl,
                             relayHitCount: relayUsageBefore?.hitCount,
                             allowRelayHitStart,
                         }
                     );
-                    attempt.started = directVerify.started;
-                    attempt.startedByRelayHit = directVerify.startedByRelayHit;
-                    attempt.relayHitObserved = directVerify.relayHitObserved;
-                    attempt.relayHitCount = directVerify.relayHitCount;
-                    attempt.snapshot = directVerify.snapshot;
+                    attempt.started = fallbackVerify.started;
+                    attempt.startedByRelayHit = fallbackVerify.startedByRelayHit;
+                    attempt.startedByRelayHitReason =
+                        fallbackVerify.startedByRelayHitReason;
+                    attempt.relayHitObserved = fallbackVerify.relayHitObserved;
+                    attempt.relayHitCount = fallbackVerify.relayHitCount;
+                    attempt.bootstrapObserved = fallbackVerify.bootstrapObserved;
+                    attempt.bootstrapReason = fallbackVerify.bootstrapReason;
+                    attempt.snapshot = fallbackVerify.snapshot;
+                    attempt.rawSnapshot = fallbackVerify.rawSnapshot;
+                    attempt.placeholderObserved = fallbackVerify.placeholderObserved;
                     attemptDiagnostics.push(attempt);
-                    if (directVerify.started) {
-                        startedWithUrl = candidateUrl;
-                        usedStrategy = strategy;
-                        verifyResult = directVerify;
-                        playbackAcceptedAtMs = directAcceptedAtMs;
-                        playbackObservedAtMs = Date.now();
-                        loopGuardAudioId = directVerify.startedByRelayHit
-                            ? undefined
-                            : readString(directVerify.snapshot?.audioId);
+                    const relayHitBootstrapPending =
+                        candidateUsesHostedRelay &&
+                        fallbackVerify.startedByRelayHit === true &&
+                        this.isSpeakerPlaybackZeroProgress(
+                            fallbackVerify.snapshot
+                        );
+                    if (relayHitBootstrapPending) {
+                        attempt.error = "relay_hit_pending_start";
+                        pendingPlayback = {
+                            startedWithUrl: candidateUrl,
+                            expectedAudioId: musicRequest.expectedAudioId,
+                            strategy,
+                            rawSnapshot: fallbackVerify.rawSnapshot,
+                            relayUsageUrl: relayUsageUrl || undefined,
+                            relayHitObserved: fallbackVerify.relayHitObserved,
+                            relayHitCount: fallbackVerify.relayHitCount,
+                        };
                         break strategyLoop;
                     }
-                    continue;
-                }
-
-                const musicRequest = this.buildExternalAudioMusicRequest(
-                    candidateUrl,
-                    options?.title
-                );
-                const fallback = await mina.playerPlayMusic(
-                    device.minaDeviceId,
-                    musicRequest.data
-                );
-                const fallbackAcceptedAtMs = Date.now();
-                const fallbackCode = Number((fallback as any)?.code);
-                const fallbackOk = Number.isFinite(fallbackCode) ? fallbackCode === 0 : true;
-                const attempt: Record<string, any> = {
-                    strategy,
-                    candidateUrl,
-                    fallbackCode,
-                    expectedAudioId: musicRequest.expectedAudioId,
-                    relayHitCountBefore: relayUsageBefore?.hitCount,
-                    transcodeToMp3: strategy === "relay-music-mp3",
-                };
-                if (!fallbackOk) {
-                    attempt.error = "cloud_rejected";
-                    attemptDiagnostics.push(attempt);
-                    continue;
-                }
-                const fallbackVerify = await this.verifySpeakerPlaybackStarted(
-                    mina,
-                    device.minaDeviceId,
-                    beforePlayback,
-                    {
-                        expectedAudioId: musicRequest.expectedAudioId,
-                        relayUrl: relayUsageBefore ? candidateUrl : undefined,
-                        relayHitCount: relayUsageBefore?.hitCount,
-                        allowRelayHitStart,
+                    if (
+                        candidateUsesHostedRelay &&
+                        this.shouldTreatAudioPlaybackAsPending(attempt)
+                    ) {
+                        if (hasAlternateAudioType) {
+                            attempt.error = "pending_retry_alt_audio_type";
+                            continue;
+                        }
+                        pendingPlayback = {
+                            startedWithUrl: candidateUrl,
+                            expectedAudioId: musicRequest.expectedAudioId,
+                            strategy,
+                            rawSnapshot: fallbackVerify.rawSnapshot,
+                            relayUsageUrl: relayUsageUrl || undefined,
+                            relayHitObserved: fallbackVerify.relayHitObserved,
+                            relayHitCount: fallbackVerify.relayHitCount,
+                        };
+                        break strategyLoop;
                     }
-                );
-                attempt.started = fallbackVerify.started;
-                attempt.startedByRelayHit = fallbackVerify.startedByRelayHit;
-                attempt.relayHitObserved = fallbackVerify.relayHitObserved;
-                attempt.relayHitCount = fallbackVerify.relayHitCount;
-                attempt.snapshot = fallbackVerify.snapshot;
-                attemptDiagnostics.push(attempt);
-                if (fallbackVerify.started) {
-                    startedWithUrl = candidateUrl;
-                    usedStrategy = strategy;
-                    verifyResult = fallbackVerify;
-                    playbackAcceptedAtMs = fallbackAcceptedAtMs;
-                    playbackObservedAtMs = Date.now();
-                    loopGuardAudioId = musicRequest.expectedAudioId;
-                    break strategyLoop;
+                    if (fallbackVerify.started) {
+                        startedWithUrl = candidateUrl;
+                        usedStrategy = strategy;
+                        verifyResult = fallbackVerify;
+                        playbackAcceptedAtMs = fallbackAcceptedAtMs;
+                        playbackObservedAtMs = Date.now();
+                        loopGuardAudioId = musicRequest.expectedAudioId;
+                        break strategyLoop;
+                    }
+                    if (fallbackVerify.bootstrapObserved) {
+                        attempt.error = "bootstrap_timed_out";
+                        if (hasAlternateAudioType) {
+                            continue;
+                        }
+                        if (
+                            !candidateUsesHostedRelay ||
+                            fallbackVerify.relayHitObserved
+                        ) {
+                            break strategyLoop;
+                        }
+                        await resetSpeakerBeforeAudioRetry();
+                        break;
+                    }
+                    if (
+                        candidateUsesHostedRelay &&
+                        fallbackVerify.relayHitObserved &&
+                        this.isSpeakerPlaybackStalledQueued(fallbackVerify.snapshot, {
+                            expectedAudioId: musicRequest.expectedAudioId,
+                        })
+                    ) {
+                        hostedRelayFetchedWithoutPlayback = true;
+                        attempt.error = "relay_fetched_without_playback";
+                        if (hasAlternateAudioType) {
+                            continue;
+                        }
+                        await resetSpeakerBeforeAudioRetry();
+                        break;
+                    }
+                    if (hasAlternateAudioType) {
+                        continue;
+                    }
+                    await resetSpeakerBeforeAudioRetry();
+                    break;
                 }
             }
         }
 
+        const detail = this.describeAudioReply(capabilityUrl, options?.title);
         if (!startedWithUrl) {
-            if (
-                externalAudioLoopTypeForced &&
-                typeof beforePlaybackLoopType === "number" &&
-                beforePlaybackLoopType !== EXTERNAL_AUDIO_NON_LOOP_TYPE
-            ) {
-                await this.setSpeakerLoopType(
-                    mina,
-                    device.minaDeviceId,
-                    beforePlaybackLoopType,
-                    "pre-playback-rollback",
-                    {
-                        requestedUrl,
-                        title: options?.title,
-                    }
-                ).catch(() => undefined);
+            if (pendingPlayback) {
+                const restoreLoopType =
+                    typeof inheritedLoopRestoreType === "number"
+                        ? inheritedLoopRestoreType
+                        : readNumber(beforePlayback?.loopType);
+                this.lastOpenclawSpeech = {
+                    text: detail,
+                    timeMs: Date.now(),
+                };
+                if (options?.armDialogWindow) {
+                    this.lastOpenclawSpeakTime = Date.now() / 1000;
+                    this.armDialogWindow(this.lastOpenclawSpeakTime);
+                }
+                this.recordConsoleEvent(
+                    options?.consoleEventKind || "tool.audio",
+                    options?.consoleEventTitle || "OpenClaw 让小爱播放音频",
+                    `${detail}，音箱已接收，正在缓冲中。`,
+                    "info",
+                    { audioUrl: pendingPlayback.startedWithUrl }
+                );
+                this.takeExternalAudioLoopGuard(device.minaDeviceId);
+                const pendingStartupDeadlineAtMs =
+                    Date.now() + EXTERNAL_AUDIO_PENDING_STARTUP_TIMEOUT_MS;
+                const pendingExpectedAudioId =
+                    readString(pendingPlayback.expectedAudioId) ||
+                    readString(pendingPlayback.rawSnapshot?.audioId);
+                this.armExternalAudioLoopGuard(mina, device, {
+                    expectedAudioId: pendingExpectedAudioId,
+                    restoreLoopType,
+                    startedWithUrl: pendingPlayback.startedWithUrl,
+                    title: options?.title,
+                    pendingStartupDeadlineAtMs,
+                });
+                await this.appendDebugTrace("audio_loop_guard_skipped_pending", {
+                    deviceId: device.minaDeviceId,
+                    expectedAudioId: pendingExpectedAudioId,
+                    restoreLoopType,
+                    startedWithUrl: pendingPlayback.startedWithUrl,
+                    title: options?.title,
+                    pendingStartupDeadlineAtMs,
+                    loopGuardArmed: true,
+                });
+                const pendingNeedsResumeNudge =
+                    hostedRelayFetchedWithoutPlayback ||
+                    readNumber(pendingPlayback.rawSnapshot?.status) === 2 ||
+                    pendingPlayback.relayHitObserved === true;
+                if (pendingNeedsResumeNudge) {
+                    void (async () => {
+                        await sleep(220);
+                        const resumed = await this.resumeSpeaker().catch(() => false);
+                        await this.appendDebugTrace("audio_playback_pending_resume", {
+                            host: mediaUrlHostKey(capabilityUrl),
+                            requestedUrl: capabilityUrl,
+                            startedWithUrl: pendingPlayback.startedWithUrl,
+                            relayUsageUrl: pendingPlayback.relayUsageUrl,
+                            relayHitObserved: pendingPlayback.relayHitObserved,
+                            relayHitCount: pendingPlayback.relayHitCount,
+                            resumed,
+                            hostedRelayFetchedWithoutPlayback,
+                            rawSnapshot: pendingPlayback.rawSnapshot || null,
+                        });
+                    })();
+                }
+                await this.appendDebugTrace("audio_playback_pending", {
+                    host: mediaUrlHostKey(capabilityUrl),
+                    requestedUrl: capabilityUrl,
+                    speakerUrl,
+                    playbackSourceUrl: requestedUrl,
+                    localStandardized: preparedSource.standardized,
+                    standardizationError: preparedSource.standardizationError,
+                    strategy: pendingPlayback.strategy,
+                    startedWithUrl: pendingPlayback.startedWithUrl,
+                    relayUsageUrl: pendingPlayback.relayUsageUrl,
+                    relayHitObserved: pendingPlayback.relayHitObserved,
+                    relayHitCount: pendingPlayback.relayHitCount,
+                    expectedAudioId:
+                        readString(pendingPlayback.expectedAudioId) ||
+                        readString(pendingPlayback.rawSnapshot?.audioId),
+                    rawSnapshot: pendingPlayback.rawSnapshot || null,
+                    relayCandidateCount: relayCandidateUrls?.length || 0,
+                    relayTranscodeCandidateCount: relayTranscodeCandidateUrls?.length || 0,
+                    preferRelay,
+                    preferMusic,
+                    canTranscodeToMp3,
+                    preferMp3Relay,
+                    hostedRelayFetchedWithoutPlayback,
+                    attempts: attemptDiagnostics,
+                });
+                return {
+                    ok: true,
+                    detail,
+                    url: pendingPlayback.startedWithUrl,
+                    pending: true,
+                };
             }
-            this.rememberAudioPlaybackFailure(device, requestedUrl);
+            const cleanedUp = await this.stopSpeaker({ fast: true }).catch(() => false);
+            if (cleanedUp) {
+                await this.clearConsoleAudioPlaybackState().catch(() => undefined);
+            }
+            this.rememberAudioPlaybackFailure(device, capabilityUrl);
             await this.appendDebugTrace("audio_playback_failed", {
-                host: mediaUrlHostKey(requestedUrl),
-                requestedUrl,
+                host: mediaUrlHostKey(capabilityUrl),
+                requestedUrl: capabilityUrl,
                 speakerUrl,
                 localStandardized: preparedSource.standardized,
                 standardizationError: preparedSource.standardizationError,
@@ -14298,6 +16324,8 @@ class XiaoaiCloudPlugin {
                 preferMusic,
                 canTranscodeToMp3,
                 preferMp3Relay,
+                cleanedUp,
+                hostedRelayFetchedWithoutPlayback,
                 attempts: attemptDiagnostics,
             });
             throw new Error(
@@ -14305,7 +16333,6 @@ class XiaoaiCloudPlugin {
             );
         }
 
-        const detail = this.describeAudioReply(requestedUrl, options?.title);
         if (usedStrategy) {
             if (
                 typeof playbackAcceptedAtMs === "number" &&
@@ -14329,11 +16356,17 @@ class XiaoaiCloudPlugin {
                 readString(loopGuardAudioId) || readString(verifyResult?.snapshot?.audioId);
             let effectivePlaybackSnapshot = verifyResult?.snapshot || null;
             const initialPlaybackSnapshot = effectivePlaybackSnapshot;
-            const hostedRelayEntry = startedWithUrl
-                ? await this.ensureHostedAudioRelayEntry(startedWithUrl)
+            const startedRelayUsageUrl =
+                this.isHostedAudioRelayUrl(speakerUrl)
+                    ? speakerUrl
+                    : startedWithUrl
+                    ? this.resolveHostedAudioRelayForCandidateUrl(startedWithUrl)
+                    : undefined;
+            const hostedRelayEntry = startedRelayUsageUrl
+                ? await this.ensureHostedAudioRelayEntry(startedRelayUsageUrl)
                 : undefined;
-            const hostedRelayUsage = startedWithUrl
-                ? this.readAudioRelayUsageForUrl(startedWithUrl)
+            const hostedRelayUsage = startedRelayUsageUrl
+                ? this.readAudioRelayUsageForUrl(startedRelayUsageUrl)
                 : undefined;
             const relayDurationMs = readNumber(hostedRelayEntry?.durationMs);
             const { deadlineLeadMs, tailPaddingMs } =
@@ -14348,8 +16381,9 @@ class XiaoaiCloudPlugin {
             );
             const initialSnapshotActivelyPlaying =
                 this.isSpeakerPlaybackActivelyPlaying(initialPlaybackSnapshot);
+            const initialSnapshotHasProgress = initialSnapshotPosition > 0;
             const relayHitDeadlineAtMs =
-                initialSnapshotActivelyPlaying
+                initialSnapshotActivelyPlaying && initialSnapshotHasProgress
                     ? this.computeRelayHitAnchoredExternalAudioDeadlineAtMs(
                         device.minaDeviceId,
                         hostedRelayEntry,
@@ -14357,7 +16391,7 @@ class XiaoaiCloudPlugin {
                     )
                     : undefined;
             const observedPlaybackDeadlineAtMs =
-                !initialSnapshotActivelyPlaying
+                !(initialSnapshotActivelyPlaying && initialSnapshotHasProgress)
                     ? undefined
                     : typeof relayDurationMs === "number" &&
                         relayDurationMs > 0 &&
@@ -14393,6 +16427,10 @@ class XiaoaiCloudPlugin {
                     : typeof relayHitDeadlineAtMs === "number"
                         ? relayHitDeadlineAtMs
                         : observedPlaybackDeadlineAtMs;
+            const pendingStartupDeadlineAtMs =
+                shouldArmLoopGuard && typeof deadlineAtMs !== "number"
+                    ? Date.now() + EXTERNAL_AUDIO_PENDING_STARTUP_TIMEOUT_MS
+                    : undefined;
             this.lastOpenclawSpeech = {
                 text: detail,
                 timeMs: Date.now(),
@@ -14416,6 +16454,7 @@ class XiaoaiCloudPlugin {
                     startedWithUrl,
                     title: options?.title,
                     deadlineAtMs,
+                    pendingStartupDeadlineAtMs,
                 });
             }
             const observedLoopType = readNumber(effectivePlaybackSnapshot?.loopType);
@@ -14430,11 +16469,12 @@ class XiaoaiCloudPlugin {
             const snapshotActivelyPlaying =
                 readNumber(effectivePlaybackSnapshot?.status) === 1 ||
                 snapshotPosition > 0;
-            this.rememberAudioPlaybackSuccess(device, requestedUrl, usedStrategy);
+            this.rememberAudioPlaybackSuccess(device, capabilityUrl, usedStrategy);
             void this.appendDebugTrace("audio_playback_started", {
-                host: mediaUrlHostKey(requestedUrl),
+                host: mediaUrlHostKey(capabilityUrl),
                 strategy: usedStrategy,
-                requestedUrl,
+                requestedUrl: capabilityUrl,
+                playbackSourceUrl: requestedUrl,
                 startedWithUrl,
                 localStandardized: preparedSource.standardized,
                 standardizationError: preparedSource.standardizationError,
@@ -14442,6 +16482,7 @@ class XiaoaiCloudPlugin {
                 loopGuardArmed: shouldArmLoopGuard,
                 restoreLoopType,
                 deadlineAtMs,
+                pendingStartupDeadlineAtMs,
                 deadlineLeadMs,
                 relayDurationMs,
                 relayHitAtMs: readNumber(hostedRelayUsage?.lastHitAtMs),
@@ -14456,6 +16497,7 @@ class XiaoaiCloudPlugin {
                 preferMp3Relay,
                 postStartLoopEnforcementQueued,
                 startedByRelayHit: verifyResult?.startedByRelayHit,
+                startedByRelayHitReason: verifyResult?.startedByRelayHitReason,
                 relayHitObserved: verifyResult?.relayHitObserved,
                 relayHitCount: verifyResult?.relayHitCount,
                 latencyProfile: this.readSpeakerAudioLatencyProfile(
@@ -14472,7 +16514,7 @@ class XiaoaiCloudPlugin {
                         EXTERNAL_AUDIO_NON_LOOP_TYPE,
                         "post-playback-start",
                         {
-                            requestedUrl,
+                            requestedUrl: capabilityUrl,
                             title: options?.title,
                             expectedAudioId: resolvedLoopGuardAudioId,
                             previousLoopType: observedLoopType,
@@ -14501,7 +16543,7 @@ class XiaoaiCloudPlugin {
                     }));
                     await this.appendDebugTrace("audio_loop_type_post_start_settled", {
                         deviceId: device.minaDeviceId,
-                        requestedUrl,
+                        requestedUrl: capabilityUrl,
                         title: options?.title,
                         expectedAudioId: resolvedLoopGuardAudioId,
                         ok: loopTypeSettled.ok,
@@ -14510,7 +16552,7 @@ class XiaoaiCloudPlugin {
                 })().catch((error) => {
                     void this.appendDebugTrace("audio_loop_type_post_start_error", {
                         deviceId: device.minaDeviceId,
-                        requestedUrl,
+                        requestedUrl: capabilityUrl,
                         title: options?.title,
                         expectedAudioId: resolvedLoopGuardAudioId,
                         errorMessage: this.errorMessage(error),
@@ -15192,14 +17234,16 @@ class XiaoaiCloudPlugin {
         const runPauseAttempt = () => {
             const attempts: Promise<true>[] = [];
 
-            attempts.push(
-                mina.playerPause(device.minaDeviceId).then((result) => {
-                    if (result?.code === 0) {
-                        return true as const;
-                    }
-                    throw new Error("mina pause rejected");
-                })
-            );
+            for (const media of SPEAKER_CONTROL_MEDIA_CANDIDATES) {
+                attempts.push(
+                    mina.playerPause(device.minaDeviceId, { media }).then((result) => {
+                        if (result?.code === 0) {
+                            return true as const;
+                        }
+                        throw new Error(`mina pause rejected (${media})`);
+                    })
+                );
+            }
 
             if (pauseAction) {
                 attempts.push(
@@ -15303,9 +17347,18 @@ class XiaoaiCloudPlugin {
             }
         }
         try {
-            const result = await mina.playerPlay(device.minaDeviceId);
-            const parsedCode = Number((result as any)?.code);
-            return Number.isFinite(parsedCode) ? parsedCode === 0 : true;
+            const results = await Promise.allSettled(
+                SPEAKER_CONTROL_MEDIA_CANDIDATES.map((media) =>
+                    mina.playerPlay(device.minaDeviceId, { media })
+                )
+            );
+            return results.some((item) => {
+                if (item.status !== "fulfilled") {
+                    return false;
+                }
+                const parsedCode = Number((item.value as any)?.code);
+                return Number.isFinite(parsedCode) ? parsedCode === 0 : true;
+            });
         } catch {
             return false;
         }
@@ -15319,15 +17372,17 @@ class XiaoaiCloudPlugin {
         const stopAction = device.speakerFeatures.stop;
         const attempts: Promise<true>[] = [];
 
-        attempts.push(
-            mina.playerStop(device.minaDeviceId).then((result) => {
-                const parsedCode = Number((result as any)?.code);
-                if (!Number.isFinite(parsedCode) || parsedCode === 0) {
-                    return true as const;
-                }
-                throw new Error("mina stop rejected");
-            })
-        );
+        for (const media of SPEAKER_CONTROL_MEDIA_CANDIDATES) {
+            attempts.push(
+                mina.playerStop(device.minaDeviceId, { media }).then((result) => {
+                    const parsedCode = Number((result as any)?.code);
+                    if (!Number.isFinite(parsedCode) || parsedCode === 0) {
+                        return true as const;
+                    }
+                    throw new Error(`mina stop rejected (${media})`);
+                })
+            );
+        }
 
         if (stopAction) {
             attempts.push(
@@ -15359,8 +17414,14 @@ class XiaoaiCloudPlugin {
         const burstStartedAtMs = Date.now();
         const attempts: Promise<unknown>[] = [];
 
-        attempts.push(mina.playerPause(device.minaDeviceId).catch(() => undefined));
-        attempts.push(mina.playerStop(device.minaDeviceId).catch(() => undefined));
+        for (const media of SPEAKER_CONTROL_MEDIA_CANDIDATES) {
+            attempts.push(
+                mina.playerPause(device.minaDeviceId, { media }).catch(() => undefined)
+            );
+            attempts.push(
+                mina.playerStop(device.minaDeviceId, { media }).catch(() => undefined)
+            );
+        }
 
         if (device.speakerFeatures.pause) {
             attempts.push(
@@ -15423,10 +17484,12 @@ class XiaoaiCloudPlugin {
         mina: MiNAClient,
         miio: MiIOClient
     ) {
-        const commands: Promise<unknown>[] = [
-            mina.playerPause(device.minaDeviceId),
-            mina.playerStop(device.minaDeviceId),
-        ];
+        const commands: Promise<unknown>[] = [];
+
+        for (const media of SPEAKER_CONTROL_MEDIA_CANDIDATES) {
+            commands.push(mina.playerPause(device.minaDeviceId, { media }));
+            commands.push(mina.playerStop(device.minaDeviceId, { media }));
+        }
 
         if (device.speakerFeatures.pause) {
             commands.push(
@@ -16132,10 +18195,10 @@ class XiaoaiCloudPlugin {
                 continue;
             }
             const text = readString((item as any).text);
-            const mediaUrl = normalizeRemoteMediaUrl(readString((item as any).mediaUrl));
+            const mediaUrl = normalizeAudioPlaybackInput(readString((item as any).mediaUrl));
             const mediaUrls = Array.isArray((item as any).mediaUrls)
                 ? (item as any).mediaUrls
-                    .map((entry: any) => normalizeRemoteMediaUrl(readString(entry)))
+                    .map((entry: any) => normalizeAudioPlaybackInput(readString(entry)))
                     .filter((entry: string | undefined): entry is string => Boolean(entry))
                 : [];
             if (!text && !mediaUrl && mediaUrls.length === 0) {
@@ -16163,7 +18226,7 @@ class XiaoaiCloudPlugin {
             .filter((item): item is string => Boolean(item));
         const mediaReplies = payloads.flatMap((payload) => {
             const urls = [
-                normalizeRemoteMediaUrl(readString(payload.mediaUrl || undefined)),
+                normalizeAudioPlaybackInput(readString(payload.mediaUrl || undefined)),
                 ...(Array.isArray(payload.mediaUrls) ? payload.mediaUrls : []),
             ].filter((item): item is string => Boolean(item));
             if (urls.length === 0) {
@@ -16231,6 +18294,7 @@ class XiaoaiCloudPlugin {
                     sessionKey: activeRun.sessionKey,
                     url: played.url,
                     title: first.title,
+                    pending: played.pending === true,
                     payloadCount: mediaReplies.length,
                 });
             }
@@ -17067,27 +19131,95 @@ class XiaoaiCloudPlugin {
                 text: schemaString({ description: "要播报给用户的中文文本" }),
             }),
             execute: async (_id: string, params: { text: string }) => {
-                console.log(`<- [播报指令/云端] ${params.text}`);
-                this.markActiveVoiceAgentSpoken(params.text);
-                this.waitingForResponse = false;
-                await this.finalizeSpokenToolReply(params.text, {
+                const text = readString(params.text);
+                if (!text) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: "[SYSTEM]播报失败：text 不能为空。",
+                        }],
+                    };
+                }
+
+                const redirectedAudio = extractAudioPlaybackInputFromText(text);
+                if (redirectedAudio) {
+                    const redirectedTitle = buildAudioRedirectTitle(
+                        text,
+                        redirectedAudio.matchedToken
+                    );
+                    const titleForContext =
+                        this.normalizeAudioReplyTitle(redirectedTitle) ||
+                        this.describeAudioReply(redirectedAudio.input, redirectedTitle);
+                    this.markActiveVoiceAgentSpoken(titleForContext);
+                    this.waitingForResponse = false;
+                    console.log(
+                        `<- [播报指令/云端] 检测到音频输入，自动改为播放: ${redirectedAudio.input}`
+                    );
+                    await this.appendDebugTrace("speak_auto_redirect_to_audio", {
+                        rawText: normalizeEventText(text, 220),
+                        audioInput: redirectedAudio.input,
+                        matchedToken: redirectedAudio.matchedToken,
+                        redirectedTitle,
+                    });
+                    try {
+                        const played = await this.playAudioUrl(redirectedAudio.input, {
+                            title: redirectedTitle,
+                            interrupt: false,
+                            armDialogWindow: true,
+                            consoleEventKind: "tool.audio",
+                            consoleEventTitle: "OpenClaw 播报指令自动改为音频播放",
+                        });
+                        return {
+                            content: [{
+                                type: "text",
+                                text:
+                                    played.pending === true
+                                        ? `[SYSTEM]检测到音频输入，已提交给音箱缓冲: ${played.detail}`
+                                        : `[SYSTEM]检测到音频输入，已开始播放: ${played.detail}`,
+                            }],
+                        };
+                    } catch (error) {
+                        const reason = this.errorMessage(error);
+                        this.recordConsoleEvent(
+                            "tool.audio",
+                            "OpenClaw 播报指令自动改音频失败，已回退文本播报",
+                            reason,
+                            "warn",
+                            { audioUrl: redirectedAudio.input }
+                        );
+                        await this.appendDebugTrace("speak_auto_redirect_to_audio_failed", {
+                            rawText: normalizeEventText(text, 220),
+                            audioInput: redirectedAudio.input,
+                            reason,
+                        });
+                    }
+                } else {
+                    console.log(`<- [播报指令/云端] ${text}`);
+                    this.markActiveVoiceAgentSpoken(text);
+                    this.waitingForResponse = false;
+                }
+
+                await this.finalizeSpokenToolReply(text, {
                     consoleEventKind: "tool.speak",
                     consoleEventTitle: "OpenClaw 让小爱播报",
                     notificationLabel: "播报回传",
                 });
-                return { content: [{ type: "text", text: `[SYSTEM]播报完成: ${params.text}` }] };
+                return { content: [{ type: "text", text: `[SYSTEM]播报完成: ${text}` }] };
             },
         });
 
         this.api.registerTool({
             name: "xiaoai_play_audio",
             description:
-                "通过小爱音箱播放一个可直接访问的音频 URL。插件会先在本地尽量标准化为统一 MP3 音频，再交给小爱播放。",
+                "通过小爱音箱播放音频。支持可直接访问的 http/https URL，也支持插件运行机器上的本地绝对路径（含 file://）。插件会先在本地尽量标准化为统一 MP3 音频，再交给小爱播放。",
             parameters: {
                 type: "object",
                 additionalProperties: false,
                 properties: {
-                    url: schemaString({ description: "要播放的 http/https 音频 URL" }),
+                    url: schemaString({
+                        description:
+                            "要播放的音频来源：可直接访问的 http/https URL，或插件运行机器上的本地绝对路径（支持 file://）。",
+                    }),
                     title: schemaString({
                         description: "可选。给这段音频起一个短标题，方便日志和控制台显示。",
                     }),
@@ -17098,12 +19230,12 @@ class XiaoaiCloudPlugin {
                 _id: string,
                 params: { url: string; title: string }
             ) => {
-                const url = normalizeRemoteMediaUrl(params.url);
+                const url = normalizeAudioPlaybackInput(params.url);
                 if (!url) {
                     return {
                         content: [{
                             type: "text",
-                            text: "[SYSTEM]音频播放失败：只支持可直接访问的 http/https 音频 URL。",
+                            text: "[SYSTEM]音频播放失败：仅支持可直接访问的 http/https 音频 URL，或插件运行机器上的本地绝对路径（含 file://）。",
                         }],
                     };
                 }
@@ -17119,7 +19251,10 @@ class XiaoaiCloudPlugin {
                 return {
                     content: [{
                         type: "text",
-                        text: `[SYSTEM]音频已开始播放: ${played.detail}`,
+                        text:
+                            played.pending === true
+                                ? `[SYSTEM]音频已提交给音箱缓冲: ${played.detail}`
+                                : `[SYSTEM]音频已开始播放: ${played.detail}`,
                     }],
                 };
             },
@@ -17170,7 +19305,10 @@ class XiaoaiCloudPlugin {
                     return {
                         content: [{
                             type: "text",
-                            text: `[SYSTEM]TTS 音频已开始播放: ${played.detail}`,
+                            text:
+                                played.pending === true
+                                    ? `[SYSTEM]TTS 音频已提交给音箱缓冲: ${played.detail}`
+                                    : `[SYSTEM]TTS 音频已开始播放: ${played.detail}`,
                         }],
                     };
                 } catch (error) {

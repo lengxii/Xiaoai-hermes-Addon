@@ -6,13 +6,17 @@ const DEFAULT_DIALOG_WINDOW_SECONDS = 30;
 const MIN_DIALOG_WINDOW_SECONDS = 5;
 const MAX_DIALOG_WINDOW_SECONDS = 300;
 const DEFAULT_CONVERSATION_POLL_INTERVAL_MS = 320;
-const MIN_CONVERSATION_POLL_INTERVAL_MS = 80;
-const MIN_RECOMMENDED_CONVERSATION_POLL_INTERVAL_MS = 120;
+const MIN_CONVERSATION_POLL_INTERVAL_MS = 200;
+const MIN_RECOMMENDED_CONVERSATION_POLL_INTERVAL_MS = 200;
 const MAX_CONVERSATION_POLL_INTERVAL_MS = 10000;
 const DEFAULT_CONVERSATION_INTERCEPT_MANUAL_OFFSET_MS = 0;
 const MIN_CONVERSATION_INTERCEPT_MANUAL_OFFSET_MS = -900;
 const MAX_CONVERSATION_INTERCEPT_MANUAL_OFFSET_MS = 900;
 const CONVERSATION_INTERCEPT_MANUAL_OFFSET_STEP_MS = 25;
+const DEFAULT_AUDIO_CALIBRATION_MANUAL_OFFSET_MS = 0;
+const MIN_AUDIO_CALIBRATION_MANUAL_OFFSET_MS = -900;
+const MAX_AUDIO_CALIBRATION_MANUAL_OFFSET_MS = 900;
+const AUDIO_CALIBRATION_MANUAL_OFFSET_STEP_MS = 25;
 const DEFAULT_AUDIO_TAIL_PADDING_MS = 1500;
 const MAX_AUDIO_TAIL_PADDING_MS = 10000;
 const DEFAULT_OPENCLAW_CONTEXT_TOKENS = 32000;
@@ -293,6 +297,10 @@ function initConsolePage() {
       "./api/device/conversation-intercept-offset",
       window.location.href
     ),
+    audioCalibrationOffset: new URL(
+      "./api/device/audio-calibration-offset",
+      window.location.href
+    ),
     audioTailPadding: new URL("./api/device/audio-tail-padding", window.location.href),
     openclawModel: new URL("./api/openclaw/model", window.location.href),
     openclawRoute: new URL("./api/openclaw/route", window.location.href),
@@ -378,6 +386,11 @@ function initConsolePage() {
     confirmedConversationInterceptManualOffsetMs:
       DEFAULT_CONVERSATION_INTERCEPT_MANUAL_OFFSET_MS,
     conversationInterceptManualOffsetSaving: false,
+    currentAudioCalibrationManualOffsetMs:
+      DEFAULT_AUDIO_CALIBRATION_MANUAL_OFFSET_MS,
+    confirmedAudioCalibrationManualOffsetMs:
+      DEFAULT_AUDIO_CALIBRATION_MANUAL_OFFSET_MS,
+    audioCalibrationManualOffsetSaving: false,
     currentAudioTailPaddingMs: DEFAULT_AUDIO_TAIL_PADDING_MS,
     confirmedAudioTailPaddingMs: DEFAULT_AUDIO_TAIL_PADDING_MS,
     audioTailPaddingEditing: false,
@@ -486,6 +499,9 @@ function initConsolePage() {
     conversationInterceptOffsetSlider: byId("conversationInterceptOffsetSlider"),
     conversationInterceptOffsetValue: byId("conversationInterceptOffsetValue"),
     conversationInterceptOffsetNote: byId("conversationInterceptOffsetNote"),
+    audioCalibrationOffsetSlider: byId("audioCalibrationOffsetSlider"),
+    audioCalibrationOffsetValue: byId("audioCalibrationOffsetValue"),
+    audioCalibrationOffsetNote: byId("audioCalibrationOffsetNote"),
     audioTailPaddingValue: byId("audioTailPaddingValue"),
     audioTailPaddingNote: byId("audioTailPaddingNote"),
     audioCalibrationPlaybackDetectValue: byId("audioCalibrationPlaybackDetectValue"),
@@ -771,6 +787,7 @@ function initConsolePage() {
       state.audioCalibrationRunning ||
       state.conversationInterceptCalibrationRunning ||
       state.audioTailPaddingSaving ||
+      state.audioCalibrationManualOffsetSaving ||
       state.pollIntervalSaving ||
       state.conversationInterceptManualOffsetSaving;
     syncCalibrationModePicker();
@@ -785,6 +802,9 @@ function initConsolePage() {
     els.conversationInterceptOffsetSlider = null;
     els.conversationInterceptOffsetValue = null;
     els.conversationInterceptOffsetNote = null;
+    els.audioCalibrationOffsetSlider = null;
+    els.audioCalibrationOffsetValue = null;
+    els.audioCalibrationOffsetNote = null;
     els.audioTailPaddingValue = null;
     els.audioTailPaddingNote = null;
     els.audioCalibrationPlaybackDetectValue = null;
@@ -2534,8 +2554,29 @@ function initConsolePage() {
     );
   }
 
+  function normalizeAudioCalibrationManualOffsetMs(value) {
+    const safe = Number(value);
+    if (!Number.isFinite(safe)) {
+      return DEFAULT_AUDIO_CALIBRATION_MANUAL_OFFSET_MS;
+    }
+    return clamp(
+      Math.round(safe / AUDIO_CALIBRATION_MANUAL_OFFSET_STEP_MS) *
+        AUDIO_CALIBRATION_MANUAL_OFFSET_STEP_MS,
+      MIN_AUDIO_CALIBRATION_MANUAL_OFFSET_MS,
+      MAX_AUDIO_CALIBRATION_MANUAL_OFFSET_MS
+    );
+  }
+
   function formatConversationInterceptManualOffset(value) {
     const safe = normalizeConversationInterceptManualOffsetMs(value);
+    if (safe === 0) {
+      return "0 ms";
+    }
+    return `${safe > 0 ? "+" : ""}${safe} ms`;
+  }
+
+  function formatAudioCalibrationManualOffset(value) {
+    const safe = normalizeAudioCalibrationManualOffsetMs(value);
     if (safe === 0) {
       return "0 ms";
     }
@@ -2904,6 +2945,17 @@ function initConsolePage() {
     }
   }
 
+  function syncAudioCalibrationManualOffsetDisplay(value) {
+    const safe = normalizeAudioCalibrationManualOffsetMs(value);
+    if (els.audioCalibrationOffsetSlider) {
+      els.audioCalibrationOffsetSlider.value = String(safe);
+    }
+    if (els.audioCalibrationOffsetValue) {
+      els.audioCalibrationOffsetValue.textContent =
+        formatAudioCalibrationManualOffset(safe);
+    }
+  }
+
   function updateVolumeDisplay(value, options) {
     const safe = clamp(Number(value) || 0, 0, 100);
     state.currentVolumeValue = safe;
@@ -2956,6 +3008,16 @@ function initConsolePage() {
       state.confirmedConversationInterceptManualOffsetMs = safe;
     }
     syncConversationInterceptManualOffsetDisplay(safe);
+    return safe;
+  }
+
+  function updateAudioCalibrationManualOffsetDisplay(value, options) {
+    const safe = normalizeAudioCalibrationManualOffsetMs(value);
+    state.currentAudioCalibrationManualOffsetMs = safe;
+    if (Boolean(options && options.forceValue)) {
+      state.confirmedAudioCalibrationManualOffsetMs = safe;
+    }
+    syncAudioCalibrationManualOffsetDisplay(safe);
     return safe;
   }
 
@@ -3611,6 +3673,17 @@ function initConsolePage() {
     els.conversationInterceptOffsetSlider.disabled = effectiveDisabled;
   }
 
+  function syncAudioCalibrationManualOffsetAvailability(disabled) {
+    if (!els.audioCalibrationOffsetSlider) {
+      return;
+    }
+    const effectiveDisabled =
+      Boolean(disabled) ||
+      state.audioCalibrationRunning ||
+      state.audioCalibrationManualOffsetSaving;
+    els.audioCalibrationOffsetSlider.disabled = effectiveDisabled;
+  }
+
   function bindPollIntervalEditor() {
     if (!els.pollIntervalValue || els.pollIntervalValue.dataset.bound === "true") {
       return;
@@ -3713,6 +3786,28 @@ function initConsolePage() {
     });
     els.conversationInterceptOffsetSlider.addEventListener("change", () => {
       void applyConversationInterceptManualOffset();
+    });
+  }
+
+  function bindAudioCalibrationOffsetSlider() {
+    if (
+      !els.audioCalibrationOffsetSlider ||
+      els.audioCalibrationOffsetSlider.dataset.bound === "true"
+    ) {
+      return;
+    }
+    els.audioCalibrationOffsetSlider.dataset.bound = "true";
+    els.audioCalibrationOffsetSlider.addEventListener("input", () => {
+      updateAudioCalibrationManualOffsetDisplay(
+        els.audioCalibrationOffsetSlider.value
+      );
+      if (els.audioCalibrationOffsetNote) {
+        els.audioCalibrationOffsetNote.textContent =
+          "向左更早收尾，向右更晚收尾";
+      }
+    });
+    els.audioCalibrationOffsetSlider.addEventListener("change", () => {
+      void applyAudioCalibrationManualOffset();
     });
   }
 
@@ -4089,16 +4184,37 @@ function initConsolePage() {
         <strong class="control-metric-value" id="audioCalibrationStatusProbeValue">-</strong>
         <span class="control-metric-note">状态轮询耗时</span>
       </div>
+      <div class="control-metric control-metric-slider calibration-offset-shell">
+        <div class="control-metric-slider-head">
+          <span class="control-metric-label">体感微调</span>
+          <strong class="control-metric-value" id="audioCalibrationOffsetValue">0 ms</strong>
+        </div>
+        <input
+          id="audioCalibrationOffsetSlider"
+          class="range-field"
+          type="range"
+          min="${escapeHtml(String(MIN_AUDIO_CALIBRATION_MANUAL_OFFSET_MS))}"
+          max="${escapeHtml(String(MAX_AUDIO_CALIBRATION_MANUAL_OFFSET_MS))}"
+          step="${escapeHtml(String(AUDIO_CALIBRATION_MANUAL_OFFSET_STEP_MS))}"
+          value="${escapeHtml(String(DEFAULT_AUDIO_CALIBRATION_MANUAL_OFFSET_MS))}"
+          aria-label="音频时序体感微调"
+        />
+        <span class="control-metric-note" id="audioCalibrationOffsetNote">向左更早收尾，向右更晚收尾</span>
+      </div>
     `;
     els.calibrationMetrics.dataset.mode = "audio";
     els.audioTailPaddingValue = byId("audioTailPaddingValue");
     els.audioTailPaddingNote = byId("audioTailPaddingNote");
+    els.audioCalibrationOffsetSlider = byId("audioCalibrationOffsetSlider");
+    els.audioCalibrationOffsetValue = byId("audioCalibrationOffsetValue");
+    els.audioCalibrationOffsetNote = byId("audioCalibrationOffsetNote");
     els.audioCalibrationPlaybackDetectValue = byId(
       "audioCalibrationPlaybackDetectValue"
     );
     els.audioCalibrationStopSettleValue = byId("audioCalibrationStopSettleValue");
     els.audioCalibrationStatusProbeValue = byId("audioCalibrationStatusProbeValue");
     bindAudioTailPaddingEditor();
+    bindAudioCalibrationOffsetSlider();
   }
 
   function renderAudioCalibrationControl(calibration) {
@@ -4120,12 +4236,25 @@ function initConsolePage() {
       nextCalibration.tailPaddingMs,
       state.confirmedAudioTailPaddingMs || DEFAULT_AUDIO_TAIL_PADDING_MS
     );
+    const manualOffsetMs = normalizeAudioCalibrationManualOffsetMs(
+      getFiniteNumber(
+        nextCalibration.manualOffsetMs,
+        getFiniteNumber(
+          currentProfile && currentProfile.manualOffsetMs,
+          state.confirmedAudioCalibrationManualOffsetMs ||
+            DEFAULT_AUDIO_CALIBRATION_MANUAL_OFFSET_MS
+        )
+      )
+    );
     state.audioCalibrationRunning = Boolean(nextCalibration.running);
     if (!state.audioTailPaddingEditing || !state.audioTailPaddingDirty) {
       updateAudioTailPaddingDisplay(tailPaddingMs, {
         forceText: !state.audioTailPaddingEditing,
       });
     }
+    updateAudioCalibrationManualOffsetDisplay(manualOffsetMs, {
+      forceValue: true,
+    });
 
     if (els.calibrationRunBtn) {
       const anyCalibrationRunning =
@@ -4140,7 +4269,7 @@ function initConsolePage() {
     if (els.calibrationDescription) {
       els.calibrationDescription.textContent = prompt
         ? prompt.title
-        : "空余延迟可修改，校准时不要和音箱说话。";
+        : "空余延迟和体感微调可修改，校准时不要和音箱说话。";
       els.calibrationDescription.dataset.tone = prompt ? "warn" : "default";
     }
 
@@ -4173,6 +4302,12 @@ function initConsolePage() {
         ? "正在保存..."
         : "尾部保守留白，回车或失焦保存";
     }
+    if (els.audioCalibrationOffsetNote) {
+      els.audioCalibrationOffsetNote.textContent =
+        state.audioCalibrationManualOffsetSaving
+          ? "正在保存..."
+          : "向左更早收尾，向右更晚收尾";
+    }
 
     if (els.calibrationDetail) {
       const detailParts = [];
@@ -4196,12 +4331,18 @@ function initConsolePage() {
           detailParts.push(`最后错误：${lastRun.lastError}`);
         }
       }
+      detailParts.push(
+        `当前体感微调 ${formatAudioCalibrationManualOffset(manualOffsetMs)}`
+      );
       if (!detailParts.length) {
         detailParts.push("可随时运行静音校准，结果会写入当前设备的延迟画像。");
       }
       els.calibrationDetail.textContent = detailParts.join(" · ");
     }
     syncAudioTailPaddingAvailability(!(state.bootstrap && state.bootstrap.ready));
+    syncAudioCalibrationManualOffsetAvailability(
+      !(state.bootstrap && state.bootstrap.ready)
+    );
     syncCalibrationModeAvailability(!(state.bootstrap && state.bootstrap.ready));
     scheduleControlMasonryLayout();
   }
@@ -6119,6 +6260,55 @@ function initConsolePage() {
       await refreshBootstrap(true);
     } finally {
       state.conversationInterceptManualOffsetSaving = false;
+      renderCalibrationControl();
+    }
+  }
+
+  async function applyAudioCalibrationManualOffset() {
+    if (state.audioCalibrationManualOffsetSaving) {
+      return;
+    }
+    const manualOffsetMs = normalizeAudioCalibrationManualOffsetMs(
+      state.currentAudioCalibrationManualOffsetMs
+    );
+    state.audioCalibrationManualOffsetSaving = true;
+    renderCalibrationControl();
+    try {
+      const payload = await postJson(API.audioCalibrationOffset, {
+        manualOffsetMs,
+      });
+      const nextManualOffsetMs = normalizeAudioCalibrationManualOffsetMs(
+        getFiniteNumber(payload && payload.manualOffsetMs, manualOffsetMs)
+      );
+      updateAudioCalibrationManualOffsetDisplay(nextManualOffsetMs, {
+        forceValue: true,
+      });
+      if (state.bootstrap) {
+        state.bootstrap.audioCalibration = Object.assign(
+          {},
+          state.bootstrap.audioCalibration,
+          payload && payload.calibration,
+          { manualOffsetMs: nextManualOffsetMs }
+        );
+      }
+      showToast(
+        payload && payload.message
+          ? String(payload.message)
+          : `音频时序微调已更新为 ${formatAudioCalibrationManualOffset(
+              nextManualOffsetMs
+            )}。`,
+        "success"
+      );
+      await refreshBootstrap(true);
+    } catch (error) {
+      updateAudioCalibrationManualOffsetDisplay(
+        state.confirmedAudioCalibrationManualOffsetMs,
+        { forceValue: true }
+      );
+      showToast(error.message || String(error), "error");
+      await refreshBootstrap(true);
+    } finally {
+      state.audioCalibrationManualOffsetSaving = false;
       renderCalibrationControl();
     }
   }
