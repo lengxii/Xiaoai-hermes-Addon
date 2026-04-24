@@ -5,7 +5,7 @@ import os
 import urllib.request
 import urllib.error
 
-XIAOAI_API_BASE = os.environ.get("XIAOAI_API_URL", "http://127.0.0.1:17890")
+XIAOAI_API_BASE = os.environ.get("XIAOAI_API_URL", "http://127.0.0.1:18790")
 
 
 def _api_call(path: str, method: str = "GET", data: dict = None) -> dict:

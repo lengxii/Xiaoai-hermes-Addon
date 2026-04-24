@@ -11,7 +11,7 @@ ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
-Environment=XIAOAI_PORT=17890
+Environment=XIAOAI_PORT=18790
 Environment=XIAOAI_HOST=0.0.0.0
 # Uncomment and set these:
 # Environment=LLM_API_URL=https://api.openai.com

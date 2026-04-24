@@ -8,7 +8,7 @@
   "minaDeviceId": "",
   "pollIntervalMs": 320,
   "authListenHost": "0.0.0.0",
-  "authPort": 17890,
+  "authPort": 18790,
   "authRoutePath": "/api/xiaoai-cloud",
   "publicBaseUrl": "",
   "audioPublicBaseUrl": "",

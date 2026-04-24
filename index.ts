@@ -1,7 +1,7 @@
 import { createXiaoaiCloudPlugin } from "./src/provider.js";
 import { createHttpServer } from "./src/http-server.js";
 
-const PORT = Number(process.env.XIAOAI_PORT || 17890);
+const PORT = Number(process.env.XIAOAI_PORT || 18790);
 const HOST = process.env.XIAOAI_HOST || "0.0.0.0";
 
 async function main() {
