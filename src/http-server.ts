@@ -10,7 +10,8 @@ interface ToolDefinition {
 
 interface PluginLike {
     registeredTools: Map<string, ToolDefinition>;
-    handleHttpRequest?: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<boolean>;
+    handleConsoleHttpRoute?: (config: any, req: http.IncomingMessage, res: http.ServerResponse, url: URL, matchedPath: string) => Promise<boolean>;
+    loadConfig?: (reload: boolean) => Promise<any>;
 }
 
 export function createHttpServer(plugin: PluginLike): http.Server {
@@ -73,10 +74,33 @@ export function createHttpServer(plugin: PluginLike): http.Server {
             return;
         }
 
-        // Delegate to plugin's custom HTTP handler (console, auth portal, etc.)
-        if (plugin.handleHttpRequest) {
-            const handled = await plugin.handleHttpRequest(req, res);
-            if (handled) return;
+        // Console and auth routes: /api/xiaoai-cloud/*
+        if (path.startsWith("/api/xiaoai-cloud") || path === "/console") {
+            // Redirect /console to /api/xiaoai-cloud/console
+            if (path === "/console") {
+                res.writeHead(302, { "Location": "/api/xiaoai-cloud/console" });
+                res.end();
+                return;
+            }
+
+            if (plugin.handleConsoleHttpRoute && plugin.loadConfig) {
+                try {
+                    const config = await plugin.loadConfig(false);
+                    const routePath = config.authRoutePath || "/api/xiaoai-cloud";
+                    const matchedPath = path.slice(routePath.length) || "/";
+                    const handled = await plugin.handleConsoleHttpRoute(config, req, res, url, matchedPath);
+                    if (handled) return;
+                } catch (error: any) {
+                    console.error("[XiaoAI Cloud] Console route error:", error.message);
+                }
+            }
+        }
+
+        // Root redirect to console
+        if (path === "/") {
+            res.writeHead(302, { "Location": "/api/xiaoai-cloud/console" });
+            res.end();
+            return;
         }
 
         // 404

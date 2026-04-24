@@ -3915,7 +3915,7 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async loadConfig(force = false): Promise<PluginConfig> {
+    async loadConfig(force = false): Promise<PluginConfig> {
         if (!force && this.config) {
             return this.config;
         }
@@ -6948,7 +6948,7 @@ class XiaoaiCloudPlugin {
         return false;
     }
 
-    private async handleConsoleHttpRoute(
+    async handleConsoleHttpRoute(
         config: PluginConfig,
         request: any,
         response: any,
