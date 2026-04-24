@@ -158,7 +158,7 @@ ${renderSharedHead(title, assetBasePath)}
             />
           </label>
           <p class="helper-text access-inline-note">
-            把 OpenClaw 发来的控制台 token 粘贴到这里即可。配对成功后会自动写入浏览器，后续一般不用重复输入。
+            把 Hermes 发来的控制台 token 粘贴到这里即可。配对成功后会自动写入浏览器，后续一般不用重复输入。
           </p>
           <button class="primary-btn access-submit" type="submit">配对</button>
         </form>
@@ -434,14 +434,14 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
               <section class="surface control-card control-card-model">
                 <div class="card-copy">
                   <span class="micro-label">模型选择</span>
-                  <div class="card-meta">更改 OpenClaw 配置里小爱 agent 的默认模型；保存后会自动重启网关。</div>
+                  <div class="card-meta">更改 Hermes 配置里小爱 agent 的默认模型；保存后会自动重启网关。</div>
                 </div>
 
                 <label class="field-shell">
                   <div class="picker-shell">
-                    <div class="picker-root" id="openclawModelPicker">
+                    <div class="picker-root" id="configModelPicker">
                       <select
-                        id="openclawModelSelect"
+                        id="configModelSelect"
                         class="picker-native"
                         autocomplete="off"
                       >
@@ -449,20 +449,20 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                       </select>
                       <button
                         class="picker-trigger"
-                        id="openclawModelPickerTrigger"
+                        id="configModelPickerTrigger"
                         type="button"
                         aria-haspopup="listbox"
                         aria-expanded="false"
-                        aria-controls="openclawModelPickerPanel"
+                        aria-controls="configModelPickerPanel"
                       >
-                        <span class="picker-trigger-text" id="openclawModelPickerText">正在读取可用模型…</span>
+                        <span class="picker-trigger-text" id="configModelPickerText">正在读取可用模型…</span>
                         <span class="picker-chevron" aria-hidden="true"></span>
                       </button>
-                      <div class="picker-panel" id="openclawModelPickerPanel" role="listbox" hidden></div>
+                      <div class="picker-panel" id="configModelPickerPanel" role="listbox" hidden></div>
                     </div>
                   </div>
                 </label>
-                <div class="card-meta" id="openclawModelDetail">当前正在读取 xiaoai agent 模型信息…</div>
+                <div class="card-meta" id="configModelDetail">当前正在读取 xiaoai agent 模型信息…</div>
               </section>
 
               <section class="surface control-card control-card-calibration">
@@ -508,8 +508,8 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                     <div class="card-meta">这里只影响登录通知、控制台链接和主动回推，不影响“小爱对话固定走 xiaoai agent”这条主链路。</div>
                   </div>
                   <div class="route-card-actions">
-                    <button class="soft-btn compact-btn" id="openclawRouteSaveBtn" type="button">保存</button>
-                    <button class="soft-btn compact-btn" id="openclawRouteDisableBtn" type="button">关闭通知</button>
+                    <button class="soft-btn compact-btn" id="routeSaveBtn" type="button">保存</button>
+                    <button class="soft-btn compact-btn" id="routeDisableBtn" type="button">关闭通知</button>
                   </div>
                 </div>
 
@@ -517,9 +517,9 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                   <label class="field-shell">
                     <span class="field-label">通知渠道</span>
                     <div class="picker-shell">
-                      <div class="picker-root" id="openclawRouteChannelPicker">
+                      <div class="picker-root" id="routeChannelPicker">
                         <select
-                          id="openclawRouteChannelSelect"
+                          id="routeChannelSelect"
                           class="picker-native"
                           autocomplete="off"
                         >
@@ -527,16 +527,16 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                         </select>
                         <button
                           class="picker-trigger"
-                          id="openclawRouteChannelPickerTrigger"
+                          id="routeChannelPickerTrigger"
                           type="button"
                           aria-haspopup="listbox"
                           aria-expanded="false"
-                          aria-controls="openclawRouteChannelPickerPanel"
+                          aria-controls="routeChannelPickerPanel"
                         >
-                          <span class="picker-trigger-text" id="openclawRouteChannelPickerText">正在读取渠道…</span>
+                          <span class="picker-trigger-text" id="routeChannelPickerText">正在读取渠道…</span>
                           <span class="picker-chevron" aria-hidden="true"></span>
                         </button>
-                        <div class="picker-panel" id="openclawRouteChannelPickerPanel" role="listbox" hidden></div>
+                        <div class="picker-panel" id="routeChannelPickerPanel" role="listbox" hidden></div>
                       </div>
                     </div>
                   </label>
@@ -544,10 +544,10 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                   <label class="field-shell">
                     <span class="field-label">通知目标</span>
                     <div class="picker-shell">
-                      <div class="picker-root" id="openclawRouteTargetPicker">
+                      <div class="picker-root" id="routeTargetPicker">
                         <div class="picker-input-frame">
                           <input
-                            id="openclawRouteTargetInput"
+                            id="routeTargetInput"
                             class="picker-input"
                             type="text"
                             placeholder="例如：qqbot:c2c:openid 或 telegram chat id"
@@ -556,18 +556,18 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                           />
                           <button
                             class="picker-input-toggle"
-                            id="openclawRouteTargetPickerToggle"
+                            id="routeTargetPickerToggle"
                             type="button"
                             aria-haspopup="listbox"
                             aria-expanded="false"
-                            aria-controls="openclawRouteTargetPickerPanel"
+                            aria-controls="routeTargetPickerPanel"
                           >
                             <span class="picker-chevron" aria-hidden="true"></span>
                           </button>
                         </div>
                         <div
                           class="picker-panel picker-panel-inline"
-                          id="openclawRouteTargetPickerPanel"
+                          id="routeTargetPickerPanel"
                           role="listbox"
                           hidden
                         ></div>
@@ -575,7 +575,7 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                     </div>
                   </label>
                 </div>
-                <div class="card-meta card-meta-break" id="openclawRouteDetail">当前正在读取插件通知渠道…</div>
+                <div class="card-meta card-meta-break" id="routeDetail">当前正在读取插件通知渠道…</div>
               </section>
 
               <section class="surface control-card control-card-workspace">
@@ -665,12 +665,12 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 <div class="card-head context-memory-head">
                   <div class="card-copy">
                     <span class="micro-label">上下文窗口</span>
-                    <div class="card-meta">直接写入 xiaoai 专属 agent 的 <code>contextTokens</code>，只影响这个 agent。OpenClaw 会自己管理会话历史。离开输入框后会自动保存。</div>
+                    <div class="card-meta">直接写入 xiaoai 专属 agent 的 <code>contextTokens</code>，只影响这个 agent。Hermes 会自己管理会话历史。离开输入框后会自动保存。</div>
                   </div>
                   <div class="context-inline-grid">
                     <label class="context-inline-field metric">
                       <input
-                        id="openclawContextTokensInput"
+                        id="contextTokensInput"
                         type="text"
                         inputmode="numeric"
                         pattern="[0-9]*"
@@ -688,7 +688,7 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 <div class="card-head">
                   <div class="card-copy">
                     <span class="micro-label">唤醒窗口</span>
-                    <div class="card-meta">唤醒模式下，OpenClaw 主动播报后继续接管后续对话的持续时间。离开输入框自动保存。</div>
+                    <div class="card-meta">唤醒模式下，Hermes 主动播报后继续接管后续对话的持续时间。离开输入框自动保存。</div>
                   </div>
                   <label class="dialog-window-inline-field metric">
                     <input
@@ -728,7 +728,7 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                 <div class="card-head toggle-card-head">
                   <div class="card-copy">
                     <span class="micro-label">强制走非流式请求</span>
-                    <div class="card-meta">默认关闭。开启后会改走 OpenClaw 官方 <code>/v1/responses</code> 非流式接口，适合规避上游 Anthropic 兼容流式事件顺序异常；首次开启时会自动启用对应端点并重启网关。</div>
+                    <div class="card-meta">默认关闭。开启后会改走 Hermes 官方 <code>/v1/responses</code> 非流式接口，适合规避上游 Anthropic 兼容流式事件顺序异常；首次开启时会自动启用对应端点并重启网关。</div>
                   </div>
                   <button
                     class="soft-btn compact-btn toggle-pill-btn"

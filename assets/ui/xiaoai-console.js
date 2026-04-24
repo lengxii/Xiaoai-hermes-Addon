@@ -285,8 +285,8 @@ function initConsolePage() {
     volume: new URL("./api/device/volume", window.location.href),
     mute: new URL("./api/device/mute", window.location.href),
     dialogWindow: new URL("./api/device/dialog-window", window.location.href),
-    thinking: new URL("./api/openclaw/thinking", window.location.href),
-    nonStreaming: new URL("./api/openclaw/non-streaming", window.location.href),
+    thinking: new URL("./api/hermes/thinking", window.location.href),
+    nonStreaming: new URL("./api/hermes/non-streaming", window.location.href),
     audioCalibration: new URL("./api/device/audio-calibration", window.location.href),
     conversationInterceptCalibration: new URL(
       "./api/device/conversation-intercept-calibration",
@@ -302,13 +302,13 @@ function initConsolePage() {
       window.location.href
     ),
     audioTailPadding: new URL("./api/device/audio-tail-padding", window.location.href),
-    openclawModel: new URL("./api/openclaw/model", window.location.href),
-    openclawRoute: new URL("./api/openclaw/route", window.location.href),
-    voiceSystemPrompt: new URL("./api/openclaw/voice-system-prompt", window.location.href),
-    workspaceFile: new URL("./api/openclaw/workspace-file", window.location.href),
+    hermesModel: new URL("./api/hermes/model", window.location.href),
+    notificationRoute: new URL("./api/hermes/route", window.location.href),
+    voiceSystemPrompt: new URL("./api/hermes/voice-system-prompt", window.location.href),
+    workspaceFile: new URL("./api/hermes/workspace-file", window.location.href),
     transitionPhrases: new URL("./api/device/transition-phrases", window.location.href),
     debugLog: new URL("./api/debug-log", window.location.href),
-    contextTokens: new URL("./api/openclaw/context-tokens", window.location.href),
+    contextTokens: new URL("./api/hermes/context-tokens", window.location.href),
     mode: new URL("./api/device/mode", window.location.href),
     wakeWord: new URL("./api/device/wake-word", window.location.href),
     deviceList: new URL("./api/device/list", window.location.href),
@@ -343,11 +343,11 @@ function initConsolePage() {
     dialogWindowDirty: false,
     dialogWindowSaving: false,
     controlScrollRevision: 0,
-    currentOpenclawContextTokensValue: DEFAULT_OPENCLAW_CONTEXT_TOKENS,
-    openclawContextTokensDirty: false,
-    openclawContextTokensSaving: false,
+    currentContextTokensValue: DEFAULT_OPENCLAW_CONTEXT_TOKENS,
+    contextTokensDirty: false,
+    contextTokensSaving: false,
     currentVoiceSystemPromptValue: "",
-    openclawWorkspaceFiles: [],
+    workspaceFiles: [],
     selectedWorkspaceFileId: "agents",
     workspaceFileDrafts: {},
     workspaceFileDirty: {},
@@ -396,17 +396,17 @@ function initConsolePage() {
     audioTailPaddingEditing: false,
     audioTailPaddingDirty: false,
     audioTailPaddingSaving: false,
-    openclawAgentId: "xiaoai",
-    openclawModel: "",
-    openclawModels: [],
-    openclawModelLoading: false,
-    openclawModelSaving: false,
-    openclawRouteChannel: "",
-    openclawRouteTarget: "",
-    openclawRouteChannels: [],
-    openclawRouteEnabled: false,
-    openclawRouteDirty: false,
-    openclawRouteSaving: false,
+    hermesAgentId: "xiaoai",
+    hermesModel: "",
+    hermesModels: [],
+    hermesModelLoading: false,
+    hermesModelSaving: false,
+    notificationChannel: "",
+    notificationTarget: "",
+    notificationChannels: [],
+    notificationRouteEnabled: false,
+    routeDirty: false,
+    routeSaving: false,
     debugLogEnabled: true,
     debugLogSaving: false,
     browserAudioReady: false,
@@ -507,31 +507,31 @@ function initConsolePage() {
     audioCalibrationPlaybackDetectValue: byId("audioCalibrationPlaybackDetectValue"),
     audioCalibrationStopSettleValue: byId("audioCalibrationStopSettleValue"),
     audioCalibrationStatusProbeValue: byId("audioCalibrationStatusProbeValue"),
-    openclawModelSelect: byId("openclawModelSelect"),
-    openclawModelPicker: byId("openclawModelPicker"),
-    openclawModelPickerTrigger: byId("openclawModelPickerTrigger"),
-    openclawModelPickerText: byId("openclawModelPickerText"),
-    openclawModelPickerPanel: byId("openclawModelPickerPanel"),
-    openclawModelDetail: byId("openclawModelDetail"),
-    openclawRouteChannelSelect: byId("openclawRouteChannelSelect"),
-    openclawRouteChannelPicker: byId("openclawRouteChannelPicker"),
-    openclawRouteChannelPickerTrigger: byId("openclawRouteChannelPickerTrigger"),
-    openclawRouteChannelPickerText: byId("openclawRouteChannelPickerText"),
-    openclawRouteChannelPickerPanel: byId("openclawRouteChannelPickerPanel"),
-    openclawRouteTargetInput: byId("openclawRouteTargetInput"),
-    openclawRouteTargetPicker: byId("openclawRouteTargetPicker"),
-    openclawRouteTargetPickerToggle: byId("openclawRouteTargetPickerToggle"),
-    openclawRouteTargetPickerPanel: byId("openclawRouteTargetPickerPanel"),
-    openclawRouteDetail: byId("openclawRouteDetail"),
-    openclawRouteSaveBtn: byId("openclawRouteSaveBtn"),
-    openclawRouteDisableBtn: byId("openclawRouteDisableBtn"),
+    configModelSelect: byId("configModelSelect"),
+    configModelPicker: byId("configModelPicker"),
+    configModelPickerTrigger: byId("configModelPickerTrigger"),
+    configModelPickerText: byId("configModelPickerText"),
+    configModelPickerPanel: byId("configModelPickerPanel"),
+    configModelDetail: byId("configModelDetail"),
+    routeChannelSelect: byId("routeChannelSelect"),
+    routeChannelPicker: byId("routeChannelPicker"),
+    routeChannelPickerTrigger: byId("routeChannelPickerTrigger"),
+    routeChannelPickerText: byId("routeChannelPickerText"),
+    routeChannelPickerPanel: byId("routeChannelPickerPanel"),
+    routeTargetInput: byId("routeTargetInput"),
+    routeTargetPicker: byId("routeTargetPicker"),
+    routeTargetPickerToggle: byId("routeTargetPickerToggle"),
+    routeTargetPickerPanel: byId("routeTargetPickerPanel"),
+    routeDetail: byId("routeDetail"),
+    routeSaveBtn: byId("routeSaveBtn"),
+    routeDisableBtn: byId("routeDisableBtn"),
     debugLogToggle: byId("debugLogToggle"),
     debugLogLabel: byId("debugLogLabel"),
     volumeSlider: byId("volumeSlider"),
     volumeMuteToggle: byId("volumeMuteToggle"),
     volumeMuteLabel: byId("volumeMuteLabel"),
     dialogWindowInput: byId("dialogWindowInput"),
-    openclawContextTokensInput: byId("openclawContextTokensInput"),
+    contextTokensInput: byId("contextTokensInput"),
     browserAudioDock: byId("browserAudioDock"),
     browserAudioPlayerShell: byId("browserAudioPlayerShell"),
     speakerAudioShell: byId("speakerAudioShell"),
@@ -573,19 +573,19 @@ function initConsolePage() {
 
   const selectPickerConfigs = [
     {
-      select: els.openclawModelSelect,
-      root: els.openclawModelPicker,
-      trigger: els.openclawModelPickerTrigger,
-      text: els.openclawModelPickerText,
-      panel: els.openclawModelPickerPanel,
+      select: els.configModelSelect,
+      root: els.configModelPicker,
+      trigger: els.configModelPickerTrigger,
+      text: els.configModelPickerText,
+      panel: els.configModelPickerPanel,
       emptyText: "未读取到可用模型",
     },
     {
-      select: els.openclawRouteChannelSelect,
-      root: els.openclawRouteChannelPicker,
-      trigger: els.openclawRouteChannelPickerTrigger,
-      text: els.openclawRouteChannelPickerText,
-      panel: els.openclawRouteChannelPickerPanel,
+      select: els.routeChannelSelect,
+      root: els.routeChannelPicker,
+      trigger: els.routeChannelPickerTrigger,
+      text: els.routeChannelPickerText,
+      panel: els.routeChannelPickerPanel,
       emptyText: "未检测到已配置渠道",
     },
     {
@@ -839,10 +839,10 @@ function initConsolePage() {
       }
     });
     if (
-      els.openclawRouteTargetPicker &&
-      els.openclawRouteTargetPicker !== exceptRoot
+      els.routeTargetPicker &&
+      els.routeTargetPicker !== exceptRoot
     ) {
-      setPickerOpen(els.openclawRouteTargetPicker, false);
+      setPickerOpen(els.routeTargetPicker, false);
     }
   }
 
@@ -918,54 +918,54 @@ function initConsolePage() {
     }
   }
 
-  function getOpenclawRouteTargetSuggestions() {
-    const currentChannel = state.openclawRouteChannels.find(
-      (item) => item.id === state.openclawRouteChannel
+  function getRouteTargetSuggestions() {
+    const currentChannel = state.notificationChannels.find(
+      (item) => item.id === state.notificationChannel
     );
     return currentChannel ? currentChannel.targets : [];
   }
 
   function syncRouteTargetPicker() {
     if (
-      !els.openclawRouteTargetPicker ||
-      !els.openclawRouteTargetInput ||
-      !els.openclawRouteTargetPickerToggle ||
-      !els.openclawRouteTargetPickerPanel
+      !els.routeTargetPicker ||
+      !els.routeTargetInput ||
+      !els.routeTargetPickerToggle ||
+      !els.routeTargetPickerPanel
     ) {
       return;
     }
 
-    const suggestions = getOpenclawRouteTargetSuggestions();
-    const currentValue = String(els.openclawRouteTargetInput.value || "").trim();
-    els.openclawRouteTargetPickerPanel.replaceChildren();
-    els.openclawRouteTargetPickerToggle.disabled =
-      els.openclawRouteTargetInput.disabled;
+    const suggestions = getRouteTargetSuggestions();
+    const currentValue = String(els.routeTargetInput.value || "").trim();
+    els.routeTargetPickerPanel.replaceChildren();
+    els.routeTargetPickerToggle.disabled =
+      els.routeTargetInput.disabled;
 
     if (!suggestions.length) {
-      els.openclawRouteTargetPickerPanel.appendChild(
+      els.routeTargetPickerPanel.appendChild(
         createPickerEmpty("当前渠道暂无候选目标，可直接手动填写。")
       );
     } else {
       suggestions.forEach((target) => {
-        els.openclawRouteTargetPickerPanel.appendChild(
+        els.routeTargetPickerPanel.appendChild(
           createPickerOption(target, "", currentValue === target, () => {
-            if (!els.openclawRouteTargetInput || els.openclawRouteTargetInput.disabled) {
+            if (!els.routeTargetInput || els.routeTargetInput.disabled) {
               return;
             }
-            els.openclawRouteTargetInput.value = target;
-            els.openclawRouteTargetInput.dispatchEvent(
+            els.routeTargetInput.value = target;
+            els.routeTargetInput.dispatchEvent(
               new Event("input", { bubbles: true })
             );
             syncRouteTargetPicker();
-            setPickerOpen(els.openclawRouteTargetPicker, false);
-            els.openclawRouteTargetInput.focus();
+            setPickerOpen(els.routeTargetPicker, false);
+            els.routeTargetInput.focus();
           })
         );
       });
     }
 
-    if (els.openclawRouteTargetPickerToggle.disabled) {
-      setPickerOpen(els.openclawRouteTargetPicker, false);
+    if (els.routeTargetPickerToggle.disabled) {
+      setPickerOpen(els.routeTargetPicker, false);
     }
   }
 
@@ -1014,35 +1014,35 @@ function initConsolePage() {
       bindSelectPicker(config);
     });
 
-    if (els.openclawRouteTargetPicker && els.openclawRouteTargetPickerToggle) {
-      els.openclawRouteTargetPickerToggle.addEventListener("click", () => {
+    if (els.routeTargetPicker && els.routeTargetPickerToggle) {
+      els.routeTargetPickerToggle.addEventListener("click", () => {
         const nextOpen =
-          els.openclawRouteTargetPicker.dataset.pickerOpen !== "true";
-        closeAllPickers(nextOpen ? els.openclawRouteTargetPicker : null);
-        setPickerOpen(els.openclawRouteTargetPicker, nextOpen);
+          els.routeTargetPicker.dataset.pickerOpen !== "true";
+        closeAllPickers(nextOpen ? els.routeTargetPicker : null);
+        setPickerOpen(els.routeTargetPicker, nextOpen);
       });
     }
 
-    if (els.openclawRouteTargetInput && els.openclawRouteTargetPicker) {
-      els.openclawRouteTargetInput.addEventListener("focus", () => {
-        if (!getOpenclawRouteTargetSuggestions().length) {
+    if (els.routeTargetInput && els.routeTargetPicker) {
+      els.routeTargetInput.addEventListener("focus", () => {
+        if (!getRouteTargetSuggestions().length) {
           return;
         }
-        closeAllPickers(els.openclawRouteTargetPicker);
-        setPickerOpen(els.openclawRouteTargetPicker, true);
+        closeAllPickers(els.routeTargetPicker);
+        setPickerOpen(els.routeTargetPicker, true);
       });
-      els.openclawRouteTargetInput.addEventListener("input", () => {
+      els.routeTargetInput.addEventListener("input", () => {
         syncRouteTargetPicker();
       });
-      els.openclawRouteTargetInput.addEventListener("keydown", (event) => {
+      els.routeTargetInput.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
-          setPickerOpen(els.openclawRouteTargetPicker, false);
+          setPickerOpen(els.routeTargetPicker, false);
           return;
         }
-        if (event.key === "ArrowDown" && getOpenclawRouteTargetSuggestions().length) {
+        if (event.key === "ArrowDown" && getRouteTargetSuggestions().length) {
           event.preventDefault();
-          closeAllPickers(els.openclawRouteTargetPicker);
-          setPickerOpen(els.openclawRouteTargetPicker, true);
+          closeAllPickers(els.routeTargetPicker);
+          setPickerOpen(els.routeTargetPicker, true);
         }
       });
     }
@@ -2487,7 +2487,7 @@ function initConsolePage() {
       refreshBootstrap(true);
     }
     if (nextTab === "control") {
-      refreshOpenclawModelState(true);
+      refreshHermesModelState(true);
       window.requestAnimationFrame(() => {
         scheduleControlMasonryLayout();
       });
@@ -3040,7 +3040,7 @@ function initConsolePage() {
     return safe;
   }
 
-  function updateOpenclawContextTokensDisplay(value, options) {
+  function updateContextTokensDisplay(value, options) {
     const safeTokens = clamp(
       Number(value) || DEFAULT_OPENCLAW_CONTEXT_TOKENS,
       MIN_OPENCLAW_CONTEXT_TOKENS,
@@ -3049,10 +3049,10 @@ function initConsolePage() {
     const forceInput = Boolean(options && options.forceInput);
     const keepUserInput =
       !forceInput &&
-      (state.openclawContextTokensDirty || state.openclawContextTokensSaving);
-    state.currentOpenclawContextTokensValue = safeTokens;
-    if (els.openclawContextTokensInput && !keepUserInput) {
-      els.openclawContextTokensInput.value = String(safeTokens);
+      (state.contextTokensDirty || state.contextTokensSaving);
+    state.currentContextTokensValue = safeTokens;
+    if (els.contextTokensInput && !keepUserInput) {
+      els.contextTokensInput.value = String(safeTokens);
     }
     return safeTokens;
   }
@@ -3092,8 +3092,8 @@ function initConsolePage() {
   }
 
   function getSelectedWorkspaceFile() {
-    const files = Array.isArray(state.openclawWorkspaceFiles)
-      ? state.openclawWorkspaceFiles
+    const files = Array.isArray(state.workspaceFiles)
+      ? state.workspaceFiles
       : [];
     const selected =
       files.find((item) => item.id === state.selectedWorkspaceFileId) || files[0] || null;
@@ -3114,8 +3114,8 @@ function initConsolePage() {
   }
 
   function renderWorkspaceFileEditor() {
-    const files = Array.isArray(state.openclawWorkspaceFiles)
-      ? state.openclawWorkspaceFiles
+    const files = Array.isArray(state.workspaceFiles)
+      ? state.workspaceFiles
       : [];
     if (els.workspaceFileSelect) {
       els.workspaceFileSelect.replaceChildren();
@@ -3217,7 +3217,7 @@ function initConsolePage() {
         content: fallbackPrompt,
       });
     }
-    state.openclawWorkspaceFiles = normalizedFiles;
+    state.workspaceFiles = normalizedFiles;
     const activeIds = new Set(normalizedFiles.map((item) => item.id));
     Object.keys(state.workspaceFileDrafts).forEach((id) => {
       if (!activeIds.has(id)) {
@@ -3277,7 +3277,7 @@ function initConsolePage() {
     }
   }
 
-  function formatOpenclawModelContextWindow(value) {
+  function formatHermesModelContextWindow(value) {
     const safe = Number(value);
     if (!Number.isFinite(safe) || safe <= 0) {
       return "";
@@ -3285,7 +3285,7 @@ function initConsolePage() {
     return safe.toLocaleString("zh-CN");
   }
 
-  function formatOpenclawModelInputs(inputs) {
+  function formatHermesModelInputs(inputs) {
     const normalized = Array.isArray(inputs)
       ? inputs
           .map((item) => String(item || "").trim().toLowerCase())
@@ -3307,7 +3307,7 @@ function initConsolePage() {
       .join(" / ");
   }
 
-  function normalizeOpenclawModelItem(value) {
+  function normalizeHermesModelItem(value) {
     if (!value || typeof value !== "object") {
       return null;
     }
@@ -3335,132 +3335,129 @@ function initConsolePage() {
     };
   }
 
-  function renderOpenclawModelControl(agentId, currentModel, models) {
-    state.openclawModelLoading = false;
-    state.openclawAgentId =
+  function renderHermesModelControl(agentId, currentModel, models) {
+    state.hermesModelLoading = false;
+    state.hermesAgentId =
       typeof agentId === "string" && agentId.trim() ? agentId.trim() : "xiaoai";
-    state.openclawModel =
+    state.hermesModel =
       typeof currentModel === "string" && currentModel.trim()
         ? currentModel.trim()
         : "";
-    state.openclawModels = Array.isArray(models)
-      ? models.map((item) => normalizeOpenclawModelItem(item)).filter(Boolean)
+    state.hermesModels = Array.isArray(models)
+      ? models.map((item) => normalizeHermesModelItem(item)).filter(Boolean)
       : [];
 
-    const currentOption = state.openclawModels.find(
-      (item) => item.ref === state.openclawModel
+    const currentOption = state.hermesModels.find(
+      (item) => item.ref === state.hermesModel
     );
 
-    if (els.openclawModelSelect) {
-      const select = els.openclawModelSelect;
+    if (els.configModelSelect) {
+      const select = els.configModelSelect;
       select.replaceChildren();
 
-      if (!state.openclawModels.length) {
+      if (!state.hermesModels.length) {
         const option = document.createElement("option");
         option.value = "";
         option.textContent = "未读取到可用模型";
         select.appendChild(option);
       } else {
-        if (!state.openclawModel) {
+        if (!state.hermesModel) {
           const placeholder = document.createElement("option");
           placeholder.value = "";
           placeholder.textContent = "请选择模型";
           select.appendChild(placeholder);
         } else if (!currentOption) {
           const missingOption = document.createElement("option");
-          missingOption.value = state.openclawModel;
-          missingOption.textContent = `${state.openclawModel}（当前模型，未在列表中）`;
+          missingOption.value = state.hermesModel;
+          missingOption.textContent = `${state.hermesModel}（当前模型，未在列表中）`;
           select.appendChild(missingOption);
         }
 
-        state.openclawModels.forEach((item) => {
+        state.hermesModels.forEach((item) => {
           const option = document.createElement("option");
           option.value = item.ref;
-          option.textContent =
-            item.name && item.name !== item.ref
-              ? `${item.name} (${item.ref})`
-              : item.ref;
+          option.textContent = item.name || item.ref;
           select.appendChild(option);
         });
       }
 
-      select.value = state.openclawModel || "";
-      if (!state.openclawModel && select.options.length > 0) {
+      select.value = state.hermesModel || "";
+      if (!state.hermesModel && select.options.length > 0) {
         select.selectedIndex = 0;
       }
       select.disabled =
-        state.openclawModelLoading ||
-        state.openclawModelSaving ||
-        !state.openclawModels.length;
+        state.hermesModelLoading ||
+        state.hermesModelSaving ||
+        !state.hermesModels.length;
     }
 
-    if (els.openclawModelDetail) {
+    if (els.configModelDetail) {
       if (currentOption) {
         const detailParts = [
-          `专属 agent：${state.openclawAgentId}`,
+          `专属 agent：${state.hermesAgentId}`,
           `提供商：${currentOption.provider}`,
           currentOption.contextWindow
-            ? `上下文：${formatOpenclawModelContextWindow(
+            ? `上下文：${formatHermesModelContextWindow(
                 currentOption.contextWindow
               )}`
             : "",
           currentOption.input.length
-            ? `输入：${formatOpenclawModelInputs(currentOption.input)}`
+            ? `输入：${formatHermesModelInputs(currentOption.input)}`
             : "",
           currentOption.reasoning ? "推理：开启" : "推理：关闭",
         ].filter(Boolean);
-        els.openclawModelDetail.textContent = detailParts.join(" · ");
-      } else if (state.openclawModel) {
-        els.openclawModelDetail.textContent = `专属 agent：${state.openclawAgentId} · 当前模型：${state.openclawModel}`;
-      } else if (state.openclawModels.length) {
-        els.openclawModelDetail.textContent = `专属 agent：${state.openclawAgentId} · 请选择一个模型，保存后会自动重启网关。`;
+        els.configModelDetail.textContent = detailParts.join(" · ");
+      } else if (state.hermesModel) {
+        els.configModelDetail.textContent = `专属 agent：${state.hermesAgentId} · 当前模型：${state.hermesModel}`;
+      } else if (state.hermesModels.length) {
+        els.configModelDetail.textContent = `专属 agent：${state.hermesAgentId} · 请选择一个模型，保存后会自动重启网关。`;
       } else {
-        els.openclawModelDetail.textContent = `专属 agent：${state.openclawAgentId} · 当前配置里还没有读取到可用模型。`;
+        els.configModelDetail.textContent = `专属 agent：${state.hermesAgentId} · 当前配置里还没有读取到可用模型。`;
       }
     }
     syncCustomPickers();
     scheduleControlMasonryLayout();
   }
 
-  function renderOpenclawModelLoading(message) {
-    state.openclawModelLoading = true;
-    if (els.openclawModelSelect) {
+  function renderHermesModelLoading(message) {
+    state.hermesModelLoading = true;
+    if (els.configModelSelect) {
       const option = document.createElement("option");
       option.value = "";
       option.textContent = "正在读取模型配置…";
-      els.openclawModelSelect.replaceChildren(option);
-      els.openclawModelSelect.disabled = true;
+      els.configModelSelect.replaceChildren(option);
+      els.configModelSelect.disabled = true;
     }
-    if (els.openclawModelDetail) {
-      els.openclawModelDetail.textContent =
-        message || "正在直接读取 OpenClaw 配置中的模型信息…";
+    if (els.configModelDetail) {
+      els.configModelDetail.textContent =
+        message || "正在直接读取 Hermes 配置中的模型信息…";
     }
     syncCustomPickers();
     scheduleControlMasonryLayout();
   }
 
-  function renderOpenclawModelLoadFailure(message) {
-    state.openclawModelLoading = false;
-    if (els.openclawModelSelect) {
+  function renderHermesModelLoadFailure(message) {
+    state.hermesModelLoading = false;
+    if (els.configModelSelect) {
       const option = document.createElement("option");
       option.value = "";
       option.textContent = "读取失败，请重试";
-      els.openclawModelSelect.replaceChildren(option);
-      els.openclawModelSelect.disabled = true;
+      els.configModelSelect.replaceChildren(option);
+      els.configModelSelect.disabled = true;
     }
-    if (els.openclawModelDetail) {
-      els.openclawModelDetail.textContent =
-        message || "读取 OpenClaw 模型配置失败，请稍后重试。";
+    if (els.configModelDetail) {
+      els.configModelDetail.textContent =
+        message || "读取 Hermes 模型配置失败，请稍后重试。";
     }
     syncCustomPickers();
     scheduleControlMasonryLayout();
   }
 
-  async function refreshOpenclawModelState(silent, options) {
-    renderOpenclawModelLoading("正在直接读取 OpenClaw 配置中的模型信息…");
+  async function refreshHermesModelState(silent, options) {
+    renderHermesModelLoading("正在直接读取 Hermes 配置中的模型信息…");
     try {
-      const payload = await apiFetch(API.openclawModel);
-      renderOpenclawModelControl(
+      const payload = await apiFetch(API.hermesModel);
+      renderHermesModelControl(
         payload && payload.agentId,
         payload && payload.model,
         payload && payload.models
@@ -3468,16 +3465,16 @@ function initConsolePage() {
       return true;
     } catch (error) {
       if (options && options.preserveOnError) {
-        renderOpenclawModelControl(
-          state.openclawAgentId,
-          state.openclawModel,
-          state.openclawModels
+        renderHermesModelControl(
+          state.hermesAgentId,
+          state.hermesModel,
+          state.hermesModels
         );
       } else {
-        renderOpenclawModelLoadFailure(
+        renderHermesModelLoadFailure(
           error && error.message
             ? `模型信息读取失败：${error.message}`
-            : "读取 OpenClaw 模型配置失败，请稍后重试。"
+            : "读取 Hermes 模型配置失败，请稍后重试。"
         );
       }
       if (!silent) {
@@ -3487,7 +3484,7 @@ function initConsolePage() {
     }
   }
 
-  function normalizeOpenclawRouteChannelItem(value) {
+  function normalizeRouteChannelItem(value) {
     const id =
       value && typeof value.id === "string" && value.id.trim()
         ? value.id.trim()
@@ -3510,7 +3507,7 @@ function initConsolePage() {
     };
   }
 
-  function resolveOpenclawRouteDefaultTarget(channelOption, target) {
+  function resolveRouteDefaultTarget(channelOption, target) {
     const explicitTarget =
       typeof target === "string" && target.trim() ? target.trim() : "";
     if (explicitTarget) {
@@ -3522,7 +3519,7 @@ function initConsolePage() {
     return "";
   }
 
-  function renderOpenclawRouteControl(route) {
+  function renderRouteControl(route) {
     const nextRoute = route && typeof route === "object" ? route : {};
     const serverChannel =
       typeof nextRoute.channel === "string" && nextRoute.channel.trim()
@@ -3534,7 +3531,7 @@ function initConsolePage() {
         : "";
     const normalizedChannels = Array.isArray(nextRoute.channels)
       ? nextRoute.channels
-          .map((item) => normalizeOpenclawRouteChannelItem(item))
+          .map((item) => normalizeRouteChannelItem(item))
           .filter(Boolean)
       : [];
     if (
@@ -3549,37 +3546,37 @@ function initConsolePage() {
       });
     }
 
-    state.openclawRouteChannels = normalizedChannels;
-    state.openclawRouteEnabled = Boolean(nextRoute.enabled) && Boolean(serverTarget);
+    state.notificationChannels = normalizedChannels;
+    state.notificationRouteEnabled = Boolean(nextRoute.enabled) && Boolean(serverTarget);
 
     const routeFocused =
-      document.activeElement === els.openclawRouteChannelSelect ||
-      document.activeElement === els.openclawRouteTargetInput;
-    if (!state.openclawRouteDirty || !routeFocused) {
-      state.openclawRouteChannel =
+      document.activeElement === els.routeChannelSelect ||
+      document.activeElement === els.routeTargetInput;
+    if (!state.routeDirty || !routeFocused) {
+      state.notificationChannel =
         serverChannel || (normalizedChannels[0] && normalizedChannels[0].id) || "";
-      state.openclawRouteDirty = false;
-    } else if (!state.openclawRouteChannel && serverChannel) {
-      state.openclawRouteChannel = serverChannel;
+      state.routeDirty = false;
+    } else if (!state.notificationChannel && serverChannel) {
+      state.notificationChannel = serverChannel;
     }
 
     const currentChannel =
-      state.openclawRouteChannel ||
+      state.notificationChannel ||
       serverChannel ||
       (normalizedChannels[0] && normalizedChannels[0].id) ||
       "";
     const currentChannelOption =
       normalizedChannels.find((item) => item.id === currentChannel) || null;
-    const resolvedServerTarget = resolveOpenclawRouteDefaultTarget(
+    const resolvedServerTarget = resolveRouteDefaultTarget(
       currentChannelOption,
       serverTarget
     );
-    if (!state.openclawRouteDirty || !routeFocused) {
-      state.openclawRouteTarget = resolvedServerTarget;
+    if (!state.routeDirty || !routeFocused) {
+      state.notificationTarget = resolvedServerTarget;
     }
 
-    if (els.openclawRouteChannelSelect) {
-      const select = els.openclawRouteChannelSelect;
+    if (els.routeChannelSelect) {
+      const select = els.routeChannelSelect;
       select.replaceChildren();
       if (!normalizedChannels.length) {
         const option = document.createElement("option");
@@ -3600,37 +3597,37 @@ function initConsolePage() {
       if (!currentChannel && select.options.length > 0) {
         select.selectedIndex = 0;
       }
-      select.disabled = state.openclawRouteSaving;
+      select.disabled = state.routeSaving;
     }
 
-    if (els.openclawRouteTargetInput) {
-      if (!state.openclawRouteDirty || document.activeElement !== els.openclawRouteTargetInput) {
-        els.openclawRouteTargetInput.value =
-          state.openclawRouteTarget || resolvedServerTarget;
+    if (els.routeTargetInput) {
+      if (!state.routeDirty || document.activeElement !== els.routeTargetInput) {
+        els.routeTargetInput.value =
+          state.notificationTarget || resolvedServerTarget;
       }
-      els.openclawRouteTargetInput.disabled = state.openclawRouteSaving;
+      els.routeTargetInput.disabled = state.routeSaving;
       const placeholderTargets = currentChannelOption ? currentChannelOption.targets : [];
-      els.openclawRouteTargetInput.placeholder = placeholderTargets.length
+      els.routeTargetInput.placeholder = placeholderTargets.length
         ? `例如：${placeholderTargets[0]}`
         : "填写当前渠道对应的目标";
     }
 
-    if (els.openclawRouteSaveBtn) {
-      els.openclawRouteSaveBtn.disabled =
-        state.openclawRouteSaving || !normalizedChannels.length;
+    if (els.routeSaveBtn) {
+      els.routeSaveBtn.disabled =
+        state.routeSaving || !normalizedChannels.length;
     }
-    if (els.openclawRouteDisableBtn) {
-      els.openclawRouteDisableBtn.disabled = state.openclawRouteSaving;
+    if (els.routeDisableBtn) {
+      els.routeDisableBtn.disabled = state.routeSaving;
     }
 
-    if (els.openclawRouteDetail) {
+    if (els.routeDetail) {
       const detailParts = [
         `专属 agent：${
           typeof nextRoute.agentId === "string" && nextRoute.agentId.trim()
             ? nextRoute.agentId.trim()
-            : state.openclawAgentId || "xiaoai"
+            : state.hermesAgentId || "xiaoai"
         }`,
-        state.openclawRouteEnabled
+        state.notificationRouteEnabled
           ? `当前通知：${serverChannel || currentChannel} / ${serverTarget}`
           : "当前通知：已关闭",
         currentChannelOption && currentChannelOption.targets.length > 1
@@ -3639,7 +3636,7 @@ function initConsolePage() {
             ? "当前渠道可自动推断唯一目标"
             : "",
       ].filter(Boolean);
-      els.openclawRouteDetail.textContent = detailParts.join(" · ");
+      els.routeDetail.textContent = detailParts.join(" · ");
     }
     syncCustomPickers();
     scheduleControlMasonryLayout();
@@ -4496,7 +4493,7 @@ function initConsolePage() {
       els.wakeBtn,
       els.volumeSlider,
       els.dialogWindowInput,
-      els.openclawContextTokensInput,
+      els.contextTokensInput,
     ].forEach((element) => {
       if (element) {
         element.disabled = disabled;
@@ -4727,38 +4724,38 @@ function initConsolePage() {
         state.currentDialogWindowValue || DEFAULT_DIALOG_WINDOW_SECONDS
       )
     );
-    updateOpenclawContextTokensDisplay(
+    updateContextTokensDisplay(
       getFiniteNumber(
-        data.openclawContextTokens,
+        data.contextTokens,
         getFiniteNumber(
-          data.openclawContextWindow,
-          state.currentOpenclawContextTokensValue
+          data.contextWindow,
+          state.currentContextTokensValue
         )
       )
     );
     state.currentVoiceSystemPromptValue =
-      typeof data.openclawVoiceSystemPrompt === "string"
-        ? data.openclawVoiceSystemPrompt
+      typeof data.voiceSystemPrompt === "string"
+        ? data.voiceSystemPrompt
         : state.currentVoiceSystemPromptValue;
-    updateWorkspaceFilesDisplay(data.openclawWorkspaceFiles);
+    updateWorkspaceFilesDisplay(data.workspaceFiles);
     updateTransitionPhrasesDisplay(
       Array.isArray(data.transitionPhrases)
         ? data.transitionPhrases
         : state.currentTransitionPhrasesValue
     );
-    renderOpenclawRouteControl(data.openclawRoute);
+    renderRouteControl(data.notificationRoute);
     renderThinkingToggle(
       Boolean(
         data && Object.prototype.hasOwnProperty.call(data, "thinkingEnabled")
           ? data.thinkingEnabled
-          : data.openclawThinkingOff === false
+          : data.thinkingOff === false
       )
     );
     renderForceNonStreamingToggle(
       Boolean(
         data &&
-          Object.prototype.hasOwnProperty.call(data, "openclawForceNonStreaming")
-          ? data.openclawForceNonStreaming
+          Object.prototype.hasOwnProperty.call(data, "forceNonStreaming")
+          ? data.forceNonStreaming
           : false
       )
     );
@@ -5580,25 +5577,25 @@ function initConsolePage() {
     }
   }
 
-  async function applyOpenclawContextTokens() {
-    if (state.openclawContextTokensSaving) {
+  async function applyContextTokens() {
+    if (state.contextTokensSaving) {
       return;
     }
-    const tokensRaw = els.openclawContextTokensInput
+    const tokensRaw = els.contextTokensInput
       ? normalizeIntegerText(
-          els.openclawContextTokensInput.value,
+          els.contextTokensInput.value,
           MAX_OPENCLAW_CONTEXT_TOKENS
         )
       : "";
 
-    if (els.openclawContextTokensInput) {
-      els.openclawContextTokensInput.value = tokensRaw;
+    if (els.contextTokensInput) {
+      els.contextTokensInput.value = tokensRaw;
     }
 
     if (!tokensRaw) {
-      state.openclawContextTokensDirty = false;
-      updateOpenclawContextTokensDisplay(
-        state.currentOpenclawContextTokensValue,
+      state.contextTokensDirty = false;
+      updateContextTokensDisplay(
+        state.currentContextTokensValue,
         { forceInput: true }
       );
       return;
@@ -5611,22 +5608,22 @@ function initConsolePage() {
     );
 
     if (
-      contextTokens === state.currentOpenclawContextTokensValue &&
-      !state.openclawContextTokensDirty
+      contextTokens === state.currentContextTokensValue &&
+      !state.contextTokensDirty
     ) {
-      updateOpenclawContextTokensDisplay(contextTokens, { forceInput: true });
+      updateContextTokensDisplay(contextTokens, { forceInput: true });
       return;
     }
 
-    state.openclawContextTokensSaving = true;
+    state.contextTokensSaving = true;
     try {
       const payload = await postJson(API.contextTokens, { contextTokens });
-      state.openclawContextTokensDirty = false;
+      state.contextTokensDirty = false;
       const nextTokens = getFiniteNumber(
         payload && payload.contextTokens,
         contextTokens
       );
-      updateOpenclawContextTokensDisplay(nextTokens, { forceInput: true });
+      updateContextTokensDisplay(nextTokens, { forceInput: true });
       showToast(
         payload && payload.message
           ? payload.message
@@ -5640,7 +5637,7 @@ function initConsolePage() {
     } catch (error) {
       showToast(error.message || String(error), "error");
     } finally {
-      state.openclawContextTokensSaving = false;
+      state.contextTokensSaving = false;
     }
   }
 
@@ -5796,19 +5793,19 @@ function initConsolePage() {
     }
   }
 
-  function commitOpenclawContextTokensFromBlur() {
+  function commitContextTokensFromBlur() {
     window.setTimeout(() => {
       const active = document.activeElement;
-      if (active === els.openclawContextTokensInput) {
+      if (active === els.contextTokensInput) {
         return;
       }
-      if (state.openclawContextTokensDirty) {
-        void applyOpenclawContextTokens();
+      if (state.contextTokensDirty) {
+        void applyContextTokens();
         return;
       }
-      if (els.openclawContextTokensInput && !els.openclawContextTokensInput.value.trim()) {
-        updateOpenclawContextTokensDisplay(
-          state.currentOpenclawContextTokensValue,
+      if (els.contextTokensInput && !els.contextTokensInput.value.trim()) {
+        updateContextTokensDisplay(
+          state.currentContextTokensValue,
           { forceInput: true }
         );
       }
@@ -5822,7 +5819,7 @@ function initConsolePage() {
       const ready = await refreshBootstrap(true);
       if (ready) {
         if (state.activeTab === "control") {
-          await refreshOpenclawModelState(true, { preserveOnError: true });
+          await refreshHermesModelState(true, { preserveOnError: true });
         }
         if (state.activeTab === "chat") {
           await refreshConversations(true);
@@ -5836,39 +5833,39 @@ function initConsolePage() {
     return false;
   }
 
-  async function applyOpenclawModel(modelRef) {
+  async function applyHermesModel(modelRef) {
     const nextModel = String(modelRef || "").trim();
     if (!nextModel) {
       showToast("请选择一个模型。", "error");
-      renderOpenclawModelControl(
-        state.openclawAgentId,
-        state.openclawModel,
-        state.openclawModels
+      renderHermesModelControl(
+        state.hermesAgentId,
+        state.hermesModel,
+        state.hermesModels
       );
       return;
     }
-    if (state.openclawModelSaving) {
+    if (state.hermesModelSaving) {
       return;
     }
-    const previousModel = state.openclawModel;
-    state.openclawModelSaving = true;
-    renderOpenclawModelControl(
-      state.openclawAgentId,
+    const previousModel = state.hermesModel;
+    state.hermesModelSaving = true;
+    renderHermesModelControl(
+      state.hermesAgentId,
       nextModel,
-      state.openclawModels
+      state.hermesModels
     );
     try {
-      const payload = await postJson(API.openclawModel, {
+      const payload = await postJson(API.hermesModel, {
         model: nextModel,
       });
       const confirmedModel =
         payload && typeof payload.model === "string" && payload.model.trim()
           ? payload.model.trim()
           : nextModel;
-      renderOpenclawModelControl(
-        payload && payload.agentId ? payload.agentId : state.openclawAgentId,
+      renderHermesModelControl(
+        payload && payload.agentId ? payload.agentId : state.hermesAgentId,
         confirmedModel,
-        state.openclawModels
+        state.hermesModels
       );
       showToast(
         payload && payload.message
@@ -5880,36 +5877,36 @@ function initConsolePage() {
         void waitForGatewayRestartRecovery();
       } else {
         await refreshBootstrap(true);
-        await refreshOpenclawModelState(true, { preserveOnError: true });
+        await refreshHermesModelState(true, { preserveOnError: true });
       }
     } catch (error) {
-      renderOpenclawModelControl(
-        state.openclawAgentId,
+      renderHermesModelControl(
+        state.hermesAgentId,
         previousModel,
-        state.openclawModels
+        state.hermesModels
       );
       showToast(error.message || String(error), "error");
     } finally {
-      state.openclawModelSaving = false;
-      renderOpenclawModelControl(
-        state.openclawAgentId,
-        state.openclawModel,
-        state.openclawModels
+      state.hermesModelSaving = false;
+      renderHermesModelControl(
+        state.hermesAgentId,
+        state.hermesModel,
+        state.hermesModels
       );
     }
   }
 
-  async function applyOpenclawRoute(options) {
-    if (state.openclawRouteSaving) {
+  async function applyRoute(options) {
+    if (state.routeSaving) {
       return;
     }
 
     const disableNotification = Boolean(options && options.disableNotification);
-    const channel = els.openclawRouteChannelSelect
-      ? String(els.openclawRouteChannelSelect.value || "").trim()
+    const channel = els.routeChannelSelect
+      ? String(els.routeChannelSelect.value || "").trim()
       : "";
-    const target = els.openclawRouteTargetInput
-      ? String(els.openclawRouteTargetInput.value || "").trim()
+    const target = els.routeTargetInput
+      ? String(els.routeTargetInput.value || "").trim()
       : "";
 
     if (!disableNotification && !channel) {
@@ -5917,23 +5914,23 @@ function initConsolePage() {
       return;
     }
 
-    state.openclawRouteSaving = true;
-    if (els.openclawRouteChannelSelect) {
-      els.openclawRouteChannelSelect.disabled = true;
+    state.routeSaving = true;
+    if (els.routeChannelSelect) {
+      els.routeChannelSelect.disabled = true;
     }
-    if (els.openclawRouteTargetInput) {
-      els.openclawRouteTargetInput.disabled = true;
+    if (els.routeTargetInput) {
+      els.routeTargetInput.disabled = true;
     }
-    if (els.openclawRouteSaveBtn) {
-      els.openclawRouteSaveBtn.disabled = true;
+    if (els.routeSaveBtn) {
+      els.routeSaveBtn.disabled = true;
     }
-    if (els.openclawRouteDisableBtn) {
-      els.openclawRouteDisableBtn.disabled = true;
+    if (els.routeDisableBtn) {
+      els.routeDisableBtn.disabled = true;
     }
 
     try {
       const payload = await postJson(
-        API.openclawRoute,
+        API.notificationRoute,
         disableNotification
           ? {
               channel,
@@ -5944,8 +5941,8 @@ function initConsolePage() {
               target ? { target } : {}
             )
       );
-      state.openclawRouteDirty = false;
-      renderOpenclawRouteControl(payload && payload.route);
+      state.routeDirty = false;
+      renderRouteControl(payload && payload.route);
       showToast(
         payload && payload.message
           ? payload.message
@@ -5962,8 +5959,8 @@ function initConsolePage() {
       showToast(error.message || String(error), "error");
       await refreshBootstrap(true);
     } finally {
-      state.openclawRouteSaving = false;
-      renderOpenclawRouteControl(state.bootstrap && state.bootstrap.openclawRoute);
+      state.routeSaving = false;
+      renderRouteControl(state.bootstrap && state.bootstrap.notificationRoute);
     }
   }
 
@@ -6639,58 +6636,58 @@ function initConsolePage() {
     });
   }
 
-  if (els.openclawModelSelect) {
-    els.openclawModelSelect.addEventListener("change", () => {
-      void applyOpenclawModel(els.openclawModelSelect.value);
+  if (els.configModelSelect) {
+    els.configModelSelect.addEventListener("change", () => {
+      void applyHermesModel(els.configModelSelect.value);
     });
   }
 
-  if (els.openclawRouteChannelSelect) {
-    els.openclawRouteChannelSelect.addEventListener("change", () => {
-      state.openclawRouteDirty = true;
-      state.openclawRouteChannel = String(
-        els.openclawRouteChannelSelect.value || ""
+  if (els.routeChannelSelect) {
+    els.routeChannelSelect.addEventListener("change", () => {
+      state.routeDirty = true;
+      state.notificationChannel = String(
+        els.routeChannelSelect.value || ""
       ).trim();
-      const currentChannel = state.openclawRouteChannels.find(
-        (item) => item.id === state.openclawRouteChannel
+      const currentChannel = state.notificationChannels.find(
+        (item) => item.id === state.notificationChannel
       );
       if (
-        els.openclawRouteTargetInput &&
-        !String(els.openclawRouteTargetInput.value || "").trim() &&
+        els.routeTargetInput &&
+        !String(els.routeTargetInput.value || "").trim() &&
         currentChannel &&
         currentChannel.targets.length === 1
       ) {
-        state.openclawRouteTarget = currentChannel.targets[0];
-        els.openclawRouteTargetInput.value = currentChannel.targets[0];
+        state.notificationTarget = currentChannel.targets[0];
+        els.routeTargetInput.value = currentChannel.targets[0];
       }
-      renderOpenclawRouteControl(state.bootstrap && state.bootstrap.openclawRoute);
+      renderRouteControl(state.bootstrap && state.bootstrap.notificationRoute);
     });
   }
 
-  if (els.openclawRouteTargetInput) {
-    els.openclawRouteTargetInput.addEventListener("input", () => {
-      state.openclawRouteDirty = true;
-      state.openclawRouteTarget = String(
-        els.openclawRouteTargetInput.value || ""
+  if (els.routeTargetInput) {
+    els.routeTargetInput.addEventListener("input", () => {
+      state.routeDirty = true;
+      state.notificationTarget = String(
+        els.routeTargetInput.value || ""
       ).trim();
     });
-    els.openclawRouteTargetInput.addEventListener("keydown", (event) => {
+    els.routeTargetInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
-        void applyOpenclawRoute();
+        void applyRoute();
       }
     });
   }
 
-  if (els.openclawRouteSaveBtn) {
-    els.openclawRouteSaveBtn.addEventListener("click", () => {
-      void applyOpenclawRoute();
+  if (els.routeSaveBtn) {
+    els.routeSaveBtn.addEventListener("click", () => {
+      void applyRoute();
     });
   }
 
-  if (els.openclawRouteDisableBtn) {
-    els.openclawRouteDisableBtn.addEventListener("click", () => {
-      void applyOpenclawRoute({ disableNotification: true });
+  if (els.routeDisableBtn) {
+    els.routeDisableBtn.addEventListener("click", () => {
+      void applyRoute({ disableNotification: true });
     });
   }
 
@@ -6843,21 +6840,21 @@ function initConsolePage() {
     });
   }
 
-  if (els.openclawContextTokensInput) {
-    els.openclawContextTokensInput.addEventListener("input", () => {
-      state.openclawContextTokensDirty = true;
-      els.openclawContextTokensInput.value = normalizeIntegerText(
-        els.openclawContextTokensInput.value,
+  if (els.contextTokensInput) {
+    els.contextTokensInput.addEventListener("input", () => {
+      state.contextTokensDirty = true;
+      els.contextTokensInput.value = normalizeIntegerText(
+        els.contextTokensInput.value,
         MAX_OPENCLAW_CONTEXT_TOKENS
       );
     });
-    els.openclawContextTokensInput.addEventListener("blur", () => {
-      commitOpenclawContextTokensFromBlur();
+    els.contextTokensInput.addEventListener("blur", () => {
+      commitContextTokensFromBlur();
     });
-    els.openclawContextTokensInput.addEventListener("keydown", (event) => {
+    els.contextTokensInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
-        void applyOpenclawContextTokens();
+        void applyContextTokens();
       }
     });
   }
@@ -6906,7 +6903,7 @@ function initConsolePage() {
   updateVolumeDisplay(0);
   state.hasVolumeSnapshot = false;
   updateDialogWindowDisplay(DEFAULT_DIALOG_WINDOW_SECONDS);
-  updateOpenclawContextTokensDisplay(DEFAULT_OPENCLAW_CONTEXT_TOKENS, {
+  updateContextTokensDisplay(DEFAULT_OPENCLAW_CONTEXT_TOKENS, {
     forceInput: true,
   });
   renderThinkingToggle(false);

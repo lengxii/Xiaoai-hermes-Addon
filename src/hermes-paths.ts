@@ -78,7 +78,4 @@ export function defaultPluginStorageDir(baseStorageDir?: string) {
     return readString(baseStorageDir) || resolvePluginStorageDir();
 }
 
-// Backward-compat aliases (will be removed later)
-export const resolveOpenclawConfigPath = resolveHermesConfigPath;
-export const resolveActiveOpenclawStateDir = resolveActiveHermesStateDir;
-export const fallbackOpenclawStateDir = fallbackHermesStateDir;
+

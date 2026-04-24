@@ -5,12 +5,13 @@ import { execFile, spawn } from "child_process";
 import { networkInterfaces } from "os";
 import { fileURLToPath } from "url";
 import JSON5 from "json5";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { renderConsoleAccessPage, renderConsolePage } from "./console-page.js";
 import {
     resolveHermesConfigPath,
     resolvePluginStorageDir,
 } from "./hermes-paths.js";
-// OpenClaw Gateway SDK removed — using direct HTTP API instead
+// Hermes Gateway SDK removed — using direct HTTP API instead
 import {
     LoginDeviceCandidate,
     LoginDiscoveryPayload,
@@ -78,14 +79,14 @@ interface PluginConfig {
     authRoutePath: string;
     publicBaseUrl?: string;
     audioPublicBaseUrl?: string;
-    openclawAgent?: string;
-    openclawChannel: string;
-    openclawTo?: string;
-    openclawNotificationsDisabled: boolean;
-    openclawCliPath: string;
-    openclawThinkingOff: boolean;
-    openclawForceNonStreaming: boolean;
-    openclawVoiceSystemPrompt: string;
+    hermesAgent?: string;
+    notificationChannel: string;
+    notificationTarget?: string;
+    notificationsDisabled: boolean;
+    hermesCliPath: string;
+    thinkingOff: boolean;
+    forceNonStreaming: boolean;
+    voiceSystemPrompt: string;
     notificationWebhookUrl?: string;
     hermesApiUrl?: string;
     transitionPhrases: string[];
@@ -174,13 +175,13 @@ interface ConsoleBootstrapPayload {
     modeLabel: string;
     wakeWordPattern?: string;
     dialogWindowSeconds: number;
-    openclawThinkingOff: boolean;
+    thinkingOff: boolean;
     thinkingEnabled: boolean;
-    openclawForceNonStreaming: boolean;
-    openclawAgentId?: string;
-    openclawContextTokens?: number;
-    openclawContextWindow?: number;
-    openclawVoiceSystemPrompt: string;
+    forceNonStreaming: boolean;
+    agentId?: string;
+    contextTokens?: number;
+    contextWindow?: number;
+    voiceSystemPrompt: string;
     transitionPhrases: string[];
     debugLogEnabled: boolean;
     voiceContextMaxTurns: number;
@@ -217,8 +218,8 @@ interface ConsoleBootstrapPayload {
         positionSeconds?: number;
         durationSeconds?: number;
     } | null;
-    openclawRoute?: ConsoleOpenclawRouteState;
-    openclawWorkspaceFiles?: ConsoleOpenclawWorkspaceState;
+    notificationRoute?: ConsoleNotificationRouteState;
+    workspaceFiles?: ConsoleWorkspaceState;
     audioCalibration?: ConsoleAudioCalibrationState;
     conversationInterceptCalibration?: ConsoleConversationInterceptCalibrationState;
 }
@@ -264,7 +265,7 @@ interface ConsoleConversationInterceptCalibrationState {
     prompt?: ConsoleCalibrationPrompt;
 }
 
-interface ConsoleOpenclawModelOption {
+interface ConsoleModelOption {
     ref: string;
     name: string;
     provider: string;
@@ -273,31 +274,31 @@ interface ConsoleOpenclawModelOption {
     input?: string[];
 }
 
-interface OpenclawAgentModelState {
+interface AgentModelState {
     agentId: string;
     model?: string;
     contextTokens?: number;
     contextWindow?: number;
     systemPrompt?: string;
-    models: ConsoleOpenclawModelOption[];
+    models: ConsoleModelOption[];
 }
 
-interface ConsoleOpenclawRouteChannelOption {
+interface ConsoleRouteChannelOption {
     id: string;
     label: string;
     configured: boolean;
     targets: string[];
 }
 
-interface ConsoleOpenclawRouteState {
+interface ConsoleNotificationRouteState {
     agentId: string;
     channel: string;
     target?: string;
     enabled: boolean;
-    channels: ConsoleOpenclawRouteChannelOption[];
+    channels: ConsoleRouteChannelOption[];
 }
 
-type OpenclawWorkspaceFileId =
+type WorkspaceFileId =
     | "agents"
     | "identity"
     | "tools"
@@ -305,8 +306,8 @@ type OpenclawWorkspaceFileId =
     | "boot"
     | "memory";
 
-interface ConsoleOpenclawWorkspaceFileState {
-    id: OpenclawWorkspaceFileId;
+interface ConsoleWorkspaceFileState {
+    id: WorkspaceFileId;
     filename: string;
     label: string;
     description: string;
@@ -318,9 +319,9 @@ interface ConsoleOpenclawWorkspaceFileState {
     content: string;
 }
 
-interface ConsoleOpenclawWorkspaceState {
+interface ConsoleWorkspaceState {
     agentId: string;
-    files: ConsoleOpenclawWorkspaceFileState[];
+    files: ConsoleWorkspaceFileState[];
 }
 
 interface ConsoleConversationEntry {
@@ -343,29 +344,29 @@ interface ActiveVoiceAgentRun {
     firstSpeakObserved: boolean;
 }
 
-interface RecentOpenclawSpeech {
+interface RecentSpeech {
     text: string;
     timeMs: number;
 }
 
-interface OpenclawReplyPayload {
+interface ReplyPayload {
     text?: string;
     mediaUrl?: string | null;
     mediaUrls?: string[];
 }
 
-interface OpenclawAgentFinalResult {
+interface AgentFinalResult {
     runId?: string;
     status?: string;
     summary?: string;
     result?: {
-        payloads?: OpenclawReplyPayload[];
+        payloads?: ReplyPayload[];
         meta?: Record<string, any>;
         stopReason?: string;
     };
 }
 
-interface OpenclawGatewayAuthState {
+interface GatewayAuthState {
     mode: string;
     token?: string;
     password?: string;
@@ -569,17 +570,17 @@ const DEFAULT_VOICE_CONTEXT_MAX_TURNS = 6;
 const DEFAULT_VOICE_CONTEXT_MAX_CHARS = 1400;
 const MAX_VOICE_CONTEXT_TURNS = 24;
 const MAX_VOICE_CONTEXT_CHARS = 8000;
-const MAX_OPENCLAW_VOICE_SYSTEM_PROMPT_CHARS = 6000;
+const MAX_VOICE_SYSTEM_PROMPT_CHARS = 6000;
 const MAX_TRANSITION_PHRASES = 12;
 const MAX_TRANSITION_PHRASE_CHARS = 40;
-const OPENCLAW_AGENT_PROMPT_FILENAME = "AGENTS.md";
+const AGENT_PROMPT_FILENAME = "AGENTS.md";
 const LEGACY_XIAOAI_AGENT_WORKSPACE_PROMPT =
-    "你正在通过真实小爱音箱实时语音对话。目标是尽快开口回答。默认先直接调用 xiaoai_speak，回答尽量简短；如果你已经拿到了可直接播放的音频 URL，也可以按 OpenClaw 官方 payload 格式直接返回 mediaUrl/mediaUrls，插件会自动交给小爱播放。除非确实需要别的工具，否则不要先输出文字。不要输出执行状态、工具回执或流程确认，只给用户真正需要听到的内容。";
+    "你正在通过真实小爱音箱实时语音对话。目标是尽快开口回答。默认先直接调用 xiaoai_speak，回答尽量简短；如果你已经拿到了可直接播放的音频 URL，也可以按 Hermes 官方 payload 格式直接返回 mediaUrl/mediaUrls，插件会自动交给小爱播放。除非确实需要别的工具，否则不要先输出文字。不要输出执行状态、工具回执或流程确认，只给用户真正需要听到的内容。";
 const LEGACY_XIAOAI_TOOLS_WORKSPACE_RULE = "只使用 xiaoai_* 工具处理音箱相关任务。";
 const DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT =
     "你正在通过真实小爱音箱实时语音对话。目标是先正确调用工具，再尽快开口。工具规则：普通文本回答调用 xiaoai_speak；用户要求播放音频、给出音频 URL 或本地文件路径（含 file://）时，必须调用 xiaoai_play_audio 并把来源写到 url 参数；只有在用户明确要求走 TTS 音频链路或排查 TTS 时才调用 xiaoai_tts_bridge。除非 xiaoai_play_audio 调用失败且无法恢复，否则不要直接返回 mediaUrl/mediaUrls 代替工具调用。不要输出工具回执、执行状态或流程确认，只说用户真正需要听到的内容。";
-const OPENCLAW_WORKSPACE_FILE_DEFINITIONS: Array<{
-    id: OpenclawWorkspaceFileId;
+const WORKSPACE_FILE_DEFINITIONS: Array<{
+    id: WorkspaceFileId;
     filename: string;
     label: string;
     description: string;
@@ -589,10 +590,10 @@ const OPENCLAW_WORKSPACE_FILE_DEFINITIONS: Array<{
 }> = [
     {
         id: "agents",
-        filename: OPENCLAW_AGENT_PROMPT_FILENAME,
+        filename: AGENT_PROMPT_FILENAME,
         label: "系统提示词",
         description:
-            "这里会直接写入专属 workspace 的 AGENTS.md，由 OpenClaw bootstrap 机制在每轮自动注入，留空保存会恢复默认内容。",
+            "这里会直接写入专属 workspace 的 AGENTS.md，由 Hermes bootstrap 机制在每轮自动注入，留空保存会恢复默认内容。",
         defaultContent: DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
         defaultEnabled: true,
         disableAllowed: false,
@@ -676,9 +677,9 @@ const POLL_RATE_LIMIT_BACKOFF_WINDOW_MS = 24_000;
 const SELF_TRIGGER_QUERY_IGNORE_WINDOW_MS = 8_000;
 const MAX_SELF_TRIGGER_QUERY_HISTORY = 16;
 const CONVERSATION_WAIT_POLL_DELAYS_MS = [250, 350, 500, 700, 900, 1200];
-const OPENCLAW_INTERCEPT_DETECTION_GRACE_MS = 3500;
-const OPENCLAW_AGENT_SUBMIT_TIMEOUT_MS = 15_000;
-const OPENCLAW_AGENT_WAIT_TIMEOUT_MS = 620_000;
+const INTERCEPT_DETECTION_GRACE_MS = 3500;
+const AGENT_SUBMIT_TIMEOUT_MS = 15_000;
+const AGENT_WAIT_TIMEOUT_MS = 620_000;
 const AUDIO_RELAY_TTL_MS = 10 * 60 * 1000;
 const MAX_AUDIO_RELAY_ENTRIES = 24;
 const INTERNAL_AUDIO_RELAY_SCHEME = "xiaoai-relay";
@@ -742,8 +743,8 @@ const CONVERSATION_INTERCEPT_CALIBRATION_QUERIES = [
     "现在是几月几号",
     "今天几号",
 ];
-const MIN_OPENCLAW_CONTEXT_TOKENS = 1;
-const MAX_OPENCLAW_CONTEXT_TOKENS = 2_000_000;
+const MIN_CONTEXT_TOKENS = 1;
+const MAX_CONTEXT_TOKENS = 2_000_000;
 const EXTERNAL_AUDIO_NON_LOOP_TYPE = 3;
 const EXTERNAL_AUDIO_LOOP_GUARD_POLL_MS = 180;
 const EXTERNAL_AUDIO_LOOP_GUARD_NEAR_END_POLL_MS = 45;
@@ -1612,20 +1613,20 @@ function normalizeSpeakerFeaturesForDevice(speakerFeatures: SpeakerFeatureMap) {
     return speakerFeatures;
 }
 
-function unwrapOpenclawVoiceSystemPrompt(value: string) {
+function unwrapVoiceSystemPrompt(value: string) {
     const matched = value.match(/^\[?\s*系统要求[:：]\s*([\s\S]*?)\s*\]?$/u);
     return matched?.[1]?.trim() || value;
 }
 
-function normalizeOpenclawVoiceSystemPrompt(
+function normalizeVoiceSystemPrompt(
     value: any,
     options?: { fallbackToDefault?: boolean }
 ) {
     const fallbackToDefault = options?.fallbackToDefault !== false;
     const raw = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
     const normalized = raw
-        ? unwrapOpenclawVoiceSystemPrompt(raw)
-              .slice(0, MAX_OPENCLAW_VOICE_SYSTEM_PROMPT_CHARS)
+        ? unwrapVoiceSystemPrompt(raw)
+              .slice(0, MAX_VOICE_SYSTEM_PROMPT_CHARS)
               .trim()
         : "";
     if (normalized) {
@@ -1635,13 +1636,13 @@ function normalizeOpenclawVoiceSystemPrompt(
 }
 
 function looksLikeLegacyXiaoaiAgentWorkspacePrompt(value: any) {
-    const normalized = normalizeOpenclawVoiceSystemPrompt(value, {
+    const normalized = normalizeVoiceSystemPrompt(value, {
         fallbackToDefault: false,
     });
     if (!normalized) {
         return false;
     }
-    const normalizedLegacyDefault = normalizeOpenclawVoiceSystemPrompt(
+    const normalizedLegacyDefault = normalizeVoiceSystemPrompt(
         LEGACY_XIAOAI_AGENT_WORKSPACE_PROMPT,
         { fallbackToDefault: false }
     );
@@ -1668,12 +1669,12 @@ function looksLikeLegacyXiaoaiToolsWorkspaceRule(value: any) {
     );
 }
 
-function findOpenclawWorkspaceFileDefinition(fileRef: any) {
+function findWorkspaceFileDefinition(fileRef: any) {
     const normalized = readString(fileRef)?.toLowerCase();
     if (!normalized) {
         return undefined;
     }
-    return OPENCLAW_WORKSPACE_FILE_DEFINITIONS.find(
+    return WORKSPACE_FILE_DEFINITIONS.find(
         (item) =>
             item.id === normalized ||
             item.filename.toLowerCase() === normalized ||
@@ -1681,9 +1682,9 @@ function findOpenclawWorkspaceFileDefinition(fileRef: any) {
     );
 }
 
-function normalizeOpenclawWorkspaceFileContent(
+function normalizeWorkspaceFileContent(
     definition: {
-        id: OpenclawWorkspaceFileId;
+        id: WorkspaceFileId;
         defaultContent: string;
     },
     value: any,
@@ -1691,14 +1692,14 @@ function normalizeOpenclawWorkspaceFileContent(
 ) {
     const fallbackToDefault = options?.fallbackToDefault !== false;
     if (definition.id === "agents") {
-        return normalizeOpenclawVoiceSystemPrompt(value, {
+        return normalizeVoiceSystemPrompt(value, {
             fallbackToDefault,
         });
     }
     const raw = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
     const normalized = raw
         ? raw
-              .slice(0, MAX_OPENCLAW_VOICE_SYSTEM_PROMPT_CHARS)
+              .slice(0, MAX_VOICE_SYSTEM_PROMPT_CHARS)
               .trim()
         : "";
     if (normalized) {
@@ -1742,14 +1743,14 @@ function readJsonObject<T>(value: string, label: string): T {
     }
 }
 
-function resolveConfiguredOpenclawModel(value: any): string | undefined {
+function resolveConfiguredModel(value: any): string | undefined {
     return pickFirstString(
         readString(value),
         readString(value?.primary)
     );
 }
 
-function normalizeOpenclawModelRef(value: any): string | undefined {
+function normalizeModelRef(value: any): string | undefined {
     const raw = readString(value);
     if (!raw) {
         return undefined;
@@ -1761,7 +1762,7 @@ function normalizeOpenclawModelRef(value: any): string | undefined {
     return raw;
 }
 
-function toConsoleOpenclawModelOption(value: any): ConsoleOpenclawModelOption | undefined {
+function toConsoleModelOption(value: any): ConsoleModelOption | undefined {
     const provider = readString(value?.provider);
     const modelId = readString(value?.id);
     if (!provider || !modelId) {
@@ -1782,10 +1783,10 @@ function toConsoleOpenclawModelOption(value: any): ConsoleOpenclawModelOption | 
     };
 }
 
-function mergeConsoleOpenclawModelOption(
-    current: ConsoleOpenclawModelOption | undefined,
-    next: ConsoleOpenclawModelOption
-): ConsoleOpenclawModelOption {
+function mergeConsoleModelOption(
+    current: ConsoleModelOption | undefined,
+    next: ConsoleModelOption
+): ConsoleModelOption {
     if (!current) {
         return next;
     }
@@ -1802,10 +1803,10 @@ function mergeConsoleOpenclawModelOption(
     };
 }
 
-function collectConfiguredOpenclawModels(
+function collectConfiguredModels(
     globalConfig: Record<string, any> | undefined
-): ConsoleOpenclawModelOption[] {
-    const modelMap = new Map<string, ConsoleOpenclawModelOption>();
+): ConsoleModelOption[] {
+    const modelMap = new Map<string, ConsoleModelOption>();
     const providers =
         globalConfig?.models?.providers &&
             typeof globalConfig.models.providers === "object"
@@ -1822,7 +1823,7 @@ function collectConfiguredOpenclawModels(
                 ? (providerConfig as any).models
                 : [];
             for (const item of items) {
-                const option = toConsoleOpenclawModelOption({
+                const option = toConsoleModelOption({
                     ...(item && typeof item === "object" ? item : {}),
                     provider,
                 });
@@ -1831,7 +1832,7 @@ function collectConfiguredOpenclawModels(
                 }
                 modelMap.set(
                     option.ref,
-                    mergeConsoleOpenclawModelOption(
+                    mergeConsoleModelOption(
                         modelMap.get(option.ref),
                         option
                     )
@@ -1850,11 +1851,11 @@ function collectConfiguredOpenclawModels(
         return Array.from(modelMap.values());
     }
 
-    const orderedModels: ConsoleOpenclawModelOption[] = [];
+    const orderedModels: ConsoleModelOption[] = [];
     for (const [entryKey, entryValue] of Object.entries(catalog)) {
         const ref =
-            normalizeOpenclawModelRef(entryKey) ||
-            normalizeOpenclawModelRef((entryValue as any)?.ref);
+            normalizeModelRef(entryKey) ||
+            normalizeModelRef((entryValue as any)?.ref);
         if (!ref) {
             continue;
         }
@@ -1865,7 +1866,7 @@ function collectConfiguredOpenclawModels(
                 .map((item: any) => readString(item))
                 .filter((item: string | undefined): item is string => Boolean(item))
             : undefined;
-        const option: ConsoleOpenclawModelOption = {
+        const option: ConsoleModelOption = {
             ref,
             name:
                 readString((entryValue as any)?.alias) ||
@@ -1877,7 +1878,7 @@ function collectConfiguredOpenclawModels(
             input: input && input.length > 0 ? input : undefined,
         };
         orderedModels.push(
-            mergeConsoleOpenclawModelOption(modelMap.get(ref), option)
+            mergeConsoleModelOption(modelMap.get(ref), option)
         );
     }
     return orderedModels.length > 0
@@ -1898,7 +1899,7 @@ function readStringList(value: any): string[] {
         .filter((item): item is string => Boolean(item));
 }
 
-function formatConsoleOpenclawChannelLabel(channelId: string) {
+function formatConsoleChannelLabel(channelId: string) {
     const normalized = readString(channelId)?.toLowerCase() || "";
     if (!normalized) {
         return "未命名渠道";
@@ -1927,7 +1928,7 @@ function formatConsoleOpenclawChannelLabel(channelId: string) {
         .join(" ");
 }
 
-function collectConfiguredOpenclawChannels(
+function collectConfiguredChannels(
     globalConfig: Record<string, any> | undefined
 ) {
     const channelsConfig =
@@ -1953,7 +1954,7 @@ function collectConfiguredOpenclawChannels(
         .filter((value): value is string => Boolean(value));
 }
 
-function collectOpenclawNotificationTargetsFromNode(
+function collectNotificationTargetsFromNode(
     value: any,
     candidates: Set<string>,
     depth = 0
@@ -1992,12 +1993,12 @@ function collectOpenclawNotificationTargetsFromNode(
 
     for (const nested of Object.values(value)) {
         if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-            collectOpenclawNotificationTargetsFromNode(nested, candidates, depth + 1);
+            collectNotificationTargetsFromNode(nested, candidates, depth + 1);
         }
     }
 }
 
-function collectOpenclawNotificationTargets(
+function collectNotificationTargets(
     globalConfig: Record<string, any> | undefined,
     channel: string | undefined
 ) {
@@ -2020,24 +2021,24 @@ function collectOpenclawNotificationTargets(
     }
 
     const candidates = new Set<string>();
-    collectOpenclawNotificationTargetsFromNode(channelConfig, candidates);
+    collectNotificationTargetsFromNode(channelConfig, candidates);
     return Array.from(candidates);
 }
 
-function inferConfiguredOpenclawChannel(
+function inferConfiguredChannel(
     globalConfig: Record<string, any> | undefined
 ) {
-    const configuredChannels = collectConfiguredOpenclawChannels(globalConfig);
+    const configuredChannels = collectConfiguredChannels(globalConfig);
     return configuredChannels.length === 1
         ? configuredChannels[0]
         : undefined;
 }
 
-function inferOpenclawNotificationTarget(
+function inferNotificationTarget(
     globalConfig: Record<string, any> | undefined,
     channel: string | undefined
 ) {
-    const candidates = collectOpenclawNotificationTargets(globalConfig, channel);
+    const candidates = collectNotificationTargets(globalConfig, channel);
     return candidates.length === 1 ? candidates[0] : undefined;
 }
 
@@ -2157,7 +2158,7 @@ function normalizeConversationInterceptManualOffsetMs(
     );
 }
 
-function normalizeOpenclawContextTokens(
+function normalizeContextTokens(
     value: any,
     fallback?: number
 ): number | undefined {
@@ -2171,8 +2172,8 @@ function normalizeOpenclawContextTokens(
     }
     return clamp(
         Math.round(candidate),
-        MIN_OPENCLAW_CONTEXT_TOKENS,
-        MAX_OPENCLAW_CONTEXT_TOKENS
+        MIN_CONTEXT_TOKENS,
+        MAX_CONTEXT_TOKENS
     );
 }
 
@@ -2442,6 +2443,70 @@ async function readHermesPluginConfig(serviceStateDir?: string) {
     }
 }
 
+const HERMES_MAIN_CONFIG_PATH = path.join(
+    process.env.HOME || "/root",
+    ".hermes",
+    "config.yaml"
+);
+
+async function readHermesMainConfig(): Promise<Record<string, any> | undefined> {
+    try {
+        const raw = await readFile(HERMES_MAIN_CONFIG_PATH, "utf8");
+        const parsed = parseYaml(raw);
+        return parsed && typeof parsed === "object" ? parsed : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+async function writeHermesMainConfig(config: Record<string, any>): Promise<void> {
+    const yaml = stringifyYaml(config, { lineWidth: 0 });
+    await writeFile(HERMES_MAIN_CONFIG_PATH, yaml, "utf8");
+}
+
+function extractHermesModels(hermesConfig: Record<string, any> | undefined): ConsoleModelOption[] {
+    if (!hermesConfig?.providers) return [];
+    const models: ConsoleModelOption[] = [];
+    for (const [providerId, providerCfg] of Object.entries(hermesConfig.providers)) {
+        const p = providerCfg as any;
+        if (!p?.models || !Array.isArray(p.models)) continue;
+        const providerLabel = p.name || providerId;
+        for (const modelName of p.models) {
+            const ref = `${providerId}/${modelName}`;
+            models.push({
+                ref,
+                name: `${providerLabel} / ${modelName}`,
+                provider: providerId,
+                reasoning: false,
+            });
+        }
+    }
+    return models;
+}
+
+
+function findProviderForModel(models: ConsoleModelOption[], modelName: string): string | undefined {
+    const found = models.find(m => m.ref.endsWith("/" + modelName) || m.ref === modelName);
+    return found?.provider;
+}
+
+function getHermesModelApiInfo(
+    hermesConfig: Record<string, any> | undefined,
+    modelRef: string
+): { apiUrl: string; apiKey: string; model: string } | undefined {
+    if (!hermesConfig?.providers) return undefined;
+    const [providerId, ...modelParts] = modelRef.split("/");
+    const modelName = modelParts.join("/");
+    const providerCfg = hermesConfig.providers[providerId];
+    if (!providerCfg) return undefined;
+    return {
+        apiUrl: providerCfg.api || "",
+        apiKey: providerCfg.api_key || process.env[providerCfg.key_env || ""] || "",
+        model: modelName,
+    };
+}
+
+
 async function discoverGatewayBaseUrls(api: any): Promise<string[]> {
     const urls = new Set<string>();
     const addUrl = (value: string | undefined) => {
@@ -2559,21 +2624,21 @@ async function resolvePluginConfig(
         apiConfig.pythonCommand,
         env.XIAOAI_CLOUD_PYTHON
     );
-    const openclawThinkingOff =
-        readBoolean(apiConfig.openclawThinkingOff) ??
-        readBoolean(env.XIAOAI_CLOUD_OPENCLAW_THINKING_OFF) ??
-        readBoolean(persisted.openclawThinkingOff) ??
+    const thinkingOff =
+        readBoolean(apiConfig.thinkingOff) ??
+        readBoolean(env.XIAOAI_CLOUD_THINKING_OFF) ??
+        readBoolean(persisted.thinkingOff) ??
         true;
-    const openclawForceNonStreaming =
-        readBoolean(apiConfig.openclawForceNonStreaming) ??
-        readBoolean(env.XIAOAI_CLOUD_OPENCLAW_FORCE_NON_STREAMING) ??
-        readBoolean(persisted.openclawForceNonStreaming) ??
+    const forceNonStreaming =
+        readBoolean(apiConfig.forceNonStreaming) ??
+        readBoolean(env.XIAOAI_CLOUD_FORCE_NON_STREAMING) ??
+        readBoolean(persisted.forceNonStreaming) ??
         false;
-    const openclawVoiceSystemPrompt = normalizeOpenclawVoiceSystemPrompt(
+    const voiceSystemPrompt = normalizeVoiceSystemPrompt(
         pickFirstString(
-            apiConfig.openclawVoiceSystemPrompt,
-            env.XIAOAI_CLOUD_OPENCLAW_VOICE_SYSTEM_PROMPT,
-            persisted.openclawVoiceSystemPrompt
+            apiConfig.voiceSystemPrompt,
+            env.XIAOAI_CLOUD_VOICE_SYSTEM_PROMPT,
+            persisted.voiceSystemPrompt
         ),
         { fallbackToDefault: true }
     );
@@ -2613,34 +2678,34 @@ async function resolvePluginConfig(
             readNumber(env.XIAOAI_CLOUD_AUDIO_TAIL_PADDING_MS) ??
             readNumber(persisted.audioTailPaddingMs)
     );
-    const explicitOpenclawChannel = pickFirstString(
-        apiConfig.openclawChannel,
-        env.XIAOAI_CLOUD_OPENCLAW_CHANNEL
+    const explicitChannel = pickFirstString(
+        apiConfig.notificationChannel,
+        env.XIAOAI_CLOUD_NOTIFICATION_CHANNEL
     );
-    const explicitOpenclawTo = pickFirstString(
-        apiConfig.openclawTo,
-        env.XIAOAI_CLOUD_OPENCLAW_TO
+    const explicitTarget = pickFirstString(
+        apiConfig.notificationTarget,
+        env.XIAOAI_CLOUD_NOTIFICATION_TARGET
     );
-    const inferredOpenclawChannel = inferConfiguredOpenclawChannel(globalConfig);
-    const openclawNotificationsDisabled =
-        readBoolean(apiConfig.openclawNotificationsDisabled) ??
-        readBoolean(env.XIAOAI_CLOUD_OPENCLAW_NOTIFICATIONS_DISABLED) ??
-        (explicitOpenclawTo ? false : readBoolean(persisted.openclawNotificationsDisabled)) ??
+    const inferredChannel = inferConfiguredChannel(globalConfig);
+    const notificationsDisabled =
+        readBoolean(apiConfig.notificationsDisabled) ??
+        readBoolean(env.XIAOAI_CLOUD_NOTIFICATIONS_DISABLED) ??
+        (explicitTarget ? false : readBoolean(persisted.notificationsDisabled)) ??
         false;
-    const resolvedOpenclawChannel =
+    const resolvedChannel =
         pickFirstString(
-            explicitOpenclawChannel,
-            persisted.openclawChannel,
-            inferredOpenclawChannel,
+            explicitChannel,
+            persisted.notificationChannel,
+            inferredChannel,
             "telegram"
-        ) || inferredOpenclawChannel || "telegram";
-    const resolvedOpenclawTo =
-        openclawNotificationsDisabled
+        ) || inferredChannel || "telegram";
+    const resolvedTarget =
+        notificationsDisabled
             ? undefined
             : pickFirstString(
-                explicitOpenclawTo,
-                persisted.openclawTo
-            ) || inferOpenclawNotificationTarget(globalConfig, resolvedOpenclawChannel);
+                explicitTarget,
+                persisted.notificationTarget
+            ) || inferNotificationTarget(globalConfig, resolvedChannel);
 
     return {
         account,
@@ -2692,6 +2757,7 @@ async function resolvePluginConfig(
         authPort: clamp(
             Math.round(
                 readNumber(apiConfig.authPort) ||
+                readNumber(globalConfig?.authPort) ||
                 readNumber(env.XIAOAI_CLOUD_AUTH_PORT) ||
                 DEFAULT_AUTH_PORT
             ),
@@ -2708,28 +2774,30 @@ async function resolvePluginConfig(
         ),
         publicBaseUrl: pickFirstString(
             apiConfig.publicBaseUrl,
+            globalConfig?.publicBaseUrl as string | undefined,
             env.XIAOAI_CLOUD_PUBLIC_BASE_URL
         ),
         audioPublicBaseUrl: pickFirstString(
             apiConfig.audioPublicBaseUrl,
+            globalConfig?.audioPublicBaseUrl as string | undefined,
             env.XIAOAI_CLOUD_AUDIO_PUBLIC_BASE_URL
         ),
-        openclawAgent: pickFirstString(
-            apiConfig.openclawAgent,
-            env.XIAOAI_CLOUD_OPENCLAW_AGENT
+        hermesAgent: pickFirstString(
+            apiConfig.hermesAgent,
+            env.XIAOAI_CLOUD_AGENT
         ),
-        openclawChannel: resolvedOpenclawChannel,
-        openclawTo: resolvedOpenclawTo,
-        openclawNotificationsDisabled,
-        openclawCliPath:
+        notificationChannel: resolvedChannel,
+        notificationTarget: resolvedTarget,
+        notificationsDisabled,
+        hermesCliPath:
             pickFirstString(
-                apiConfig.openclawCliPath,
-                env.XIAOAI_CLOUD_OPENCLAW_CLI,
-                "openclaw"
-            ) || "openclaw",
-        openclawThinkingOff,
-        openclawForceNonStreaming,
-        openclawVoiceSystemPrompt,
+                apiConfig.hermesCliPath,
+                env.XIAOAI_CLOUD_CLI,
+                "hermes"
+            ) || "hermes",
+        thinkingOff,
+        forceNonStreaming,
+        voiceSystemPrompt,
         transitionPhrases,
         debugLogEnabled,
         voiceContextMaxTurns,
@@ -2794,7 +2862,7 @@ class XiaoaiCloudPlugin {
     private lastConversationQuery = "";
     private currentMode: InterceptMode = "wake";
     private continuousDialogWindow = DEFAULT_DIALOG_WINDOW_SECONDS;
-    private lastOpenclawSpeakTime = 0;
+    private lastSpeakTime = 0;
     private lastDialogWindowOpenedAt = 0;
     private lastNonZeroVolume = 15;
     private volumeMutationSequence = 0;
@@ -2818,13 +2886,13 @@ class XiaoaiCloudPlugin {
     private latestConversationFetchKey?: string;
     private latestConversationFetchPromise?: Promise<any | null>;
     private conversationFetchInflightCount = 0;
-    private openclawVoiceSessionKey?: string;
-    private openclawVoiceSessionExpiresAt = 0;
+    private voiceSessionKey?: string;
+    private voiceSessionExpiresAt = 0;
     private voiceContextTurns: VoiceContextTurn[] = [];
     private voiceContextArchiveSessionKey?: string;
     private voiceContextArchiveText = "";
     private activeVoiceAgentRuns: ActiveVoiceAgentRun[] = [];
-    private lastOpenclawSpeech?: RecentOpenclawSpeech;
+    private lastSpeech?: RecentSpeech;
     private recentSelfTriggeredQueries: RecentSelfTriggeredQuery[] = [];
     // Gateway client removed — using direct HTTP API
     private notificationChannelUnavailableUntil = 0;
@@ -3836,17 +3904,17 @@ class XiaoaiCloudPlugin {
             miDid: device?.miDid || config.miDid,
             minaDeviceId: device?.minaDeviceId || config.minaDeviceId,
             tokenStorePath: config.tokenStorePath,
-            openclawChannel: config.openclawChannel,
-            openclawTo: config.openclawTo,
-            openclawNotificationsDisabled: config.openclawNotificationsDisabled,
+            notificationChannel: config.notificationChannel,
+            notificationTarget: config.notificationTarget,
+            notificationsDisabled: config.notificationsDisabled,
             wakeWordPattern: config.wakeWordPattern,
             dialogWindowSeconds: config.dialogWindowSeconds,
-            openclawThinkingOff: config.openclawThinkingOff,
-            openclawForceNonStreaming: config.openclawForceNonStreaming,
-            openclawVoiceSystemPrompt:
-                config.openclawVoiceSystemPrompt === DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT
+            thinkingOff: config.thinkingOff,
+            forceNonStreaming: config.forceNonStreaming,
+            voiceSystemPrompt:
+                config.voiceSystemPrompt === DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT
                     ? undefined
-                    : config.openclawVoiceSystemPrompt,
+                    : config.voiceSystemPrompt,
             transitionPhrases:
                 JSON.stringify(config.transitionPhrases || []) ===
                 JSON.stringify(DEFAULT_TRANSITION_PHRASES)
@@ -4807,19 +4875,19 @@ class XiaoaiCloudPlugin {
             .slice(-max);
     }
 
-    private async findRecentOpenclawSpeechResult(
+    private async findRecentSpeechResult(
         query: string,
         startedAt: number
     ): Promise<ConsoleConversationEntry | null> {
         const normalizedQuery = normalizeEventText(query, 1000) || query.trim();
-        const inMemorySpeech = this.lastOpenclawSpeech;
+        const inMemorySpeech = this.lastSpeech;
         if (
             inMemorySpeech &&
             inMemorySpeech.timeMs >= startedAt - 1000 &&
             inMemorySpeech.text
         ) {
             return {
-                id: `openclaw-${inMemorySpeech.timeMs}`,
+                id: `hermes-${inMemorySpeech.timeMs}`,
                 time: new Date(inMemorySpeech.timeMs).toISOString(),
                 query: normalizedQuery,
                 answers: [inMemorySpeech.text],
@@ -4858,20 +4926,20 @@ class XiaoaiCloudPlugin {
         query: string,
         startedAt: number,
         timeoutMs = 15000,
-        options?: { preferOpenclaw?: boolean }
+        options?: { preferHermes?: boolean }
     ): Promise<ConsoleConversationEntry | null> {
         const normalizedQuery = normalizeEventText(query, 1000) || query.trim();
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
-        const preferOpenclaw = Boolean(options?.preferOpenclaw);
+        const preferHermes = Boolean(options?.preferHermes);
 
         while (Date.now() < deadline) {
-            const openclawSpeech = await this.findRecentOpenclawSpeechResult(
+            const hermesSpeech = await this.findRecentSpeechResult(
                 normalizedQuery,
                 startedAt
             );
-            if (openclawSpeech) {
-                return openclawSpeech;
+            if (hermesSpeech) {
+                return hermesSpeech;
             }
 
             const history = await this.fetchConversationHistory(6).catch(() => []);
@@ -4883,15 +4951,15 @@ class XiaoaiCloudPlugin {
                     itemTime >= startedAt - 5000
                 );
             });
-            const openclawPending =
+            const hermesPending =
                 this.waitingForResponse || this.pendingAgentPromptCount > 0;
             const withinInterceptGrace =
-                preferOpenclaw &&
-                Date.now() < startedAt + OPENCLAW_INTERCEPT_DETECTION_GRACE_MS;
+                preferHermes &&
+                Date.now() < startedAt + INTERCEPT_DETECTION_GRACE_MS;
             if (
                 matched &&
                 matched.answers.length > 0 &&
-                !openclawPending &&
+                !hermesPending &&
                 !withinInterceptGrace
             ) {
                 return matched;
@@ -4920,9 +4988,9 @@ class XiaoaiCloudPlugin {
             volume,
             consoleUrl,
             audioPlayback,
-            openclawAgentState,
-            openclawRoute,
-            openclawWorkspaceFiles,
+            hermesAgentState,
+            notificationRoute,
+            workspaceFiles,
         ] = await Promise.all([
             this.getMicoapiHelperStatus(config),
             config?.account
@@ -4932,16 +5000,16 @@ class XiaoaiCloudPlugin {
             this.getConsoleEntryUrl().catch(() => undefined),
             this.buildConsoleAudioPlayback().catch(() => null),
             config
-                ? this.queryOpenclawAgentModelState(config).catch(() => undefined)
+                ? this.queryAgentModelState(config).catch(() => undefined)
                 : Promise.resolve(undefined),
             config
-                ? this.buildConsoleOpenclawRouteState(config).catch(() => undefined)
+                ? this.buildConsoleNotificationRouteState(config).catch(() => undefined)
                 : Promise.resolve(undefined),
             config
-                ? this.queryOpenclawWorkspaceFilesState(config).catch(() => undefined)
+                ? this.queryWorkspaceFilesState(config).catch(() => undefined)
                 : Promise.resolve(undefined),
         ]);
-        const agentsWorkspaceFile = openclawWorkspaceFiles?.files.find(
+        const agentsWorkspaceFile = workspaceFiles?.files.find(
             (item) => item.id === "agents"
         );
         const authenticated = Boolean(this.device) || Boolean(config?.account && hasPersistedSession);
@@ -4968,16 +5036,16 @@ class XiaoaiCloudPlugin {
                 config?.wakeWordPattern ||
                 DEFAULT_WAKE_WORD_PATTERN,
             dialogWindowSeconds: this.continuousDialogWindow,
-            openclawThinkingOff: config?.openclawThinkingOff ?? true,
-            thinkingEnabled: !(config?.openclawThinkingOff ?? true),
-            openclawForceNonStreaming: config?.openclawForceNonStreaming ?? false,
-            openclawAgentId: openclawAgentState?.agentId,
-            openclawContextTokens: openclawAgentState?.contextTokens,
-            openclawContextWindow: openclawAgentState?.contextWindow,
-            openclawVoiceSystemPrompt:
+            thinkingOff: config?.thinkingOff ?? true,
+            thinkingEnabled: !(config?.thinkingOff ?? true),
+            forceNonStreaming: config?.forceNonStreaming ?? false,
+            agentId: hermesAgentState?.agentId,
+            contextTokens: hermesAgentState?.contextTokens,
+            contextWindow: hermesAgentState?.contextWindow,
+            voiceSystemPrompt:
                 agentsWorkspaceFile?.content ||
-                openclawAgentState?.systemPrompt ||
-                config?.openclawVoiceSystemPrompt ||
+                hermesAgentState?.systemPrompt ||
+                config?.voiceSystemPrompt ||
                 DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
             transitionPhrases:
                 config?.transitionPhrases?.slice() || DEFAULT_TRANSITION_PHRASES.slice(),
@@ -5026,8 +5094,8 @@ class XiaoaiCloudPlugin {
                 }
                 : null,
             audioPlayback,
-            openclawRoute,
-            openclawWorkspaceFiles,
+            notificationRoute,
+            workspaceFiles,
             audioCalibration: this.buildConsoleAudioCalibrationState(),
             conversationInterceptCalibration:
                 this.buildConsoleConversationInterceptCalibrationState(),
@@ -5129,32 +5197,78 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async queryOpenclawAgentModelState(
+
+    private async persistConfigUpdates(updates: Record<string, string>) {
+        const configPath = resolveHermesConfigPath({ serviceStateDir: this.serviceStateDir });
+        let current: Record<string, any> = {};
+        try {
+            const raw = await readFile(configPath, "utf8");
+            current = JSON5.parse(raw) || {};
+        } catch {
+            // File doesn't exist or is invalid, start fresh
+        }
+        for (const [key, value] of Object.entries(updates)) {
+            current[key] = value;
+        }
+        await writeFile(configPath, JSON.stringify(current, null, 2) + "\n", "utf8");
+        // Invalidate cached config
+        this.config = undefined;
+    }
+
+    private async queryAgentModelState(
         config: PluginConfig
-    ): Promise<OpenclawAgentModelState> {
+    ): Promise<AgentModelState> {
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const agentId = this.resolveManagedOpenclawAgentId(config, globalConfig);
-        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
+        const hermesMainConfig = await readHermesMainConfig().catch(() => undefined);
+
+        // Resolve agent ID: check plugin config first, then main config
+        let agentId = this.resolveManagedAgentId(config, globalConfig);
+        let { agentConfig } = this.readAgentConfig(globalConfig, agentId);
+        if (!agentConfig && hermesMainConfig) {
+            // Also try resolving from main config (where xiaoai agent lives)
+            const mainAgentId = this.resolveManagedAgentId(config, hermesMainConfig);
+            const mainResult = this.readAgentConfig(hermesMainConfig, mainAgentId);
+            if (mainResult.agentConfig) {
+                agentId = mainAgentId;
+                agentConfig = mainResult.agentConfig;
+            }
+        }
+
         const currentModel =
-            resolveConfiguredOpenclawModel(agentConfig?.model) ||
-            resolveConfiguredOpenclawModel(globalConfig?.agents?.defaults?.model);
-        const models = collectConfiguredOpenclawModels(globalConfig);
-        const currentModelOption = currentModel
-            ? models.find((item) => item.ref === currentModel)
+            resolveConfiguredModel(agentConfig?.model) ||
+            resolveConfiguredModel(globalConfig?.agents?.defaults?.model) ||
+            resolveConfiguredModel(hermesMainConfig?.agents?.defaults?.model);
+        let models = collectConfiguredModels(globalConfig);
+
+        // Fallback: read models from Hermes main config.yaml
+        if (models.length === 0) {
+            if (hermesMainConfig) {
+                models = extractHermesModels(hermesMainConfig);
+            }
+        }
+
+        // Current model: prefer agent config model, then llmModel from XiaoAI config
+        const effectiveModel = currentModel
+            || (config.llmModel
+                ? `${findProviderForModel(models, config.llmModel) || "unknown"}/${config.llmModel}`
+                : undefined);
+        const currentModelOption = effectiveModel
+            ? models.find((item) => item.ref === effectiveModel || item.ref.endsWith("/" + config.llmModel))
             : undefined;
-        const workspacePath = this.resolveOpenclawAgentWorkspacePath(
+
+        const workspacePath = this.resolveAgentWorkspacePath(
             agentId,
             agentConfig,
             globalConfig
         );
-        const promptState = await this.readOpenclawAgentWorkspacePromptState(
+        const promptState = await this.readAgentWorkspacePromptState(
             workspacePath,
-            config.openclawVoiceSystemPrompt
+            config.voiceSystemPrompt
         );
         return {
             agentId,
-            model: currentModel,
-            contextTokens: this.resolveOpenclawAgentContextTokens(
+            model: effectiveModel,
+            contextTokens: this.resolveAgentContextTokens(
                 agentConfig,
                 globalConfig
             ),
@@ -5168,14 +5282,27 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async buildConsoleOpenclawRouteState(
+    private async buildConsoleNotificationRouteState(
         config: PluginConfig
-    ): Promise<ConsoleOpenclawRouteState> {
+    ): Promise<ConsoleNotificationRouteState> {
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const configuredChannels = collectConfiguredOpenclawChannels(globalConfig);
+        let configuredChannels = collectConfiguredChannels(globalConfig);
+
+        // Also read channels from Hermes main config
+        const hermesConfig = await readHermesMainConfig().catch(() => undefined);
+        if (hermesConfig) {
+            const hermesChannels: string[] = [];
+            for (const ch of ["telegram", "discord", "whatsapp", "slack", "mattermost", "signal"]) {
+                if (hermesConfig[ch] && typeof hermesConfig[ch] === "object") {
+                    hermesChannels.push(ch);
+                }
+            }
+            configuredChannels = Array.from(new Set([...configuredChannels, ...hermesChannels]));
+        }
+
         const currentChannel =
-            readString(config.openclawChannel)?.toLowerCase() ||
-            inferConfiguredOpenclawChannel(globalConfig) ||
+            readString(config.notificationChannel)?.toLowerCase() ||
+            inferConfiguredChannel(globalConfig) ||
             "telegram";
         const channelIds = Array.from(
             new Set(
@@ -5186,33 +5313,33 @@ class XiaoaiCloudPlugin {
         );
         const channels = channelIds.map((channelId) => ({
             id: channelId,
-            label: formatConsoleOpenclawChannelLabel(channelId),
+            label: formatConsoleChannelLabel(channelId),
             configured: configuredChannels.includes(channelId),
-            targets: collectOpenclawNotificationTargets(globalConfig, channelId),
+            targets: collectNotificationTargets(globalConfig, channelId),
         }));
 
         return {
-            agentId: readString(config.openclawAgent) || "main",
+            agentId: readString(config.hermesAgent) || "main",
             channel: currentChannel,
-            target: readString(config.openclawTo),
+            target: readString(config.notificationTarget),
             enabled:
-                config.openclawNotificationsDisabled !== true &&
-                Boolean(readString(config.openclawTo)),
+                config.notificationsDisabled !== true &&
+                Boolean(readString(config.notificationTarget)),
             channels,
         };
     }
 
-    private readOpenclawAgentListFromConfig(globalConfig: Record<string, any> | undefined) {
+    private readAgentListFromConfig(globalConfig: Record<string, any> | undefined) {
         return Array.isArray(globalConfig?.agents?.list)
             ? globalConfig.agents.list
             : undefined;
     }
 
-    private readOpenclawAgentConfig(
+    private readAgentConfig(
         globalConfig: Record<string, any> | undefined,
         agentId: string
     ) {
-        const agentsList = this.readOpenclawAgentListFromConfig(globalConfig);
+        const agentsList = this.readAgentListFromConfig(globalConfig);
         const agentIndex = Array.isArray(agentsList)
             ? agentsList.findIndex((item) => readString(item?.id) === agentId)
             : -1;
@@ -5227,33 +5354,33 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private resolveManagedOpenclawAgentId(
+    private resolveManagedAgentId(
         config: PluginConfig | undefined,
         globalConfig?: Record<string, any> | undefined
     ) {
-        const explicitAgentId = readString(config?.openclawAgent);
+        const explicitAgentId = readString(config?.hermesAgent);
         if (explicitAgentId) {
             return explicitAgentId;
         }
         const preferredAgentId = "xiaoai";
-        const { agentConfig } = this.readOpenclawAgentConfig(
+        const { agentConfig } = this.readAgentConfig(
             globalConfig,
             preferredAgentId
         );
         return agentConfig ? preferredAgentId : "main";
     }
 
-    private resolveOpenclawAgentContextTokens(
+    private resolveAgentContextTokens(
         agentConfig: Record<string, any> | undefined,
         globalConfig: Record<string, any> | undefined
     ) {
         return (
-            normalizeOpenclawContextTokens(agentConfig?.contextTokens) ??
-            normalizeOpenclawContextTokens(globalConfig?.agents?.defaults?.contextTokens)
+            normalizeContextTokens(agentConfig?.contextTokens) ??
+            normalizeContextTokens(globalConfig?.agents?.defaults?.contextTokens)
         );
     }
 
-    private resolveOpenclawAgentWorkspacePath(
+    private resolveAgentWorkspacePath(
         agentId: string,
         agentConfig: Record<string, any> | undefined,
         globalConfig: Record<string, any> | undefined
@@ -5267,11 +5394,11 @@ class XiaoaiCloudPlugin {
             : "";
     }
 
-    private async readOpenclawAgentWorkspacePromptState(
+    private async readAgentWorkspacePromptState(
         workspacePath: string | undefined,
         fallbackPrompt?: string
     ) {
-        const prompt = normalizeOpenclawVoiceSystemPrompt(fallbackPrompt, {
+        const prompt = normalizeVoiceSystemPrompt(fallbackPrompt, {
             fallbackToDefault: true,
         });
         if (!workspacePath) {
@@ -5282,11 +5409,11 @@ class XiaoaiCloudPlugin {
                 raw: "",
             };
         }
-        const filePath = path.join(workspacePath, OPENCLAW_AGENT_PROMPT_FILENAME);
+        const filePath = path.join(workspacePath, AGENT_PROMPT_FILENAME);
         try {
             const raw = await readFile(filePath, "utf8");
             return {
-                prompt: normalizeOpenclawVoiceSystemPrompt(raw, {
+                prompt: normalizeVoiceSystemPrompt(raw, {
                     fallbackToDefault: true,
                 }),
                 exists: true,
@@ -5303,25 +5430,25 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private async writeOpenclawAgentWorkspacePrompt(
+    private async writeAgentWorkspacePrompt(
         workspacePath: string,
         prompt: string
     ) {
         await mkdir(workspacePath, { recursive: true });
         await writeFile(
-            path.join(workspacePath, OPENCLAW_AGENT_PROMPT_FILENAME),
-            `${normalizeOpenclawVoiceSystemPrompt(prompt, {
+            path.join(workspacePath, AGENT_PROMPT_FILENAME),
+            `${normalizeVoiceSystemPrompt(prompt, {
                 fallbackToDefault: true,
             })}\n`,
             "utf8"
         );
     }
 
-    private async readOpenclawWorkspaceFileState(
+    private async readWorkspaceFileState(
         workspacePath: string | undefined,
-        fileRef: OpenclawWorkspaceFileId | string
-    ): Promise<ConsoleOpenclawWorkspaceFileState> {
-        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        fileRef: WorkspaceFileId | string
+    ): Promise<ConsoleWorkspaceFileState> {
+        const definition = findWorkspaceFileDefinition(fileRef);
         if (!definition) {
             throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
         }
@@ -5337,7 +5464,7 @@ class XiaoaiCloudPlugin {
                 fileExists = false;
             }
         }
-        const normalizedStored = normalizeOpenclawWorkspaceFileContent(definition, raw, {
+        const normalizedStored = normalizeWorkspaceFileContent(definition, raw, {
             fallbackToDefault: false,
         });
         const enabled = fileExists && Boolean(normalizedStored);
@@ -5355,16 +5482,16 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async writeOpenclawWorkspaceFile(
+    private async writeWorkspaceFile(
         workspacePath: string,
-        fileRef: OpenclawWorkspaceFileId | string,
+        fileRef: WorkspaceFileId | string,
         content: string
     ) {
-        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        const definition = findWorkspaceFileDefinition(fileRef);
         if (!definition) {
             throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
         }
-        const normalized = normalizeOpenclawWorkspaceFileContent(definition, content, {
+        const normalized = normalizeWorkspaceFileContent(definition, content, {
             fallbackToDefault: true,
         });
         await mkdir(workspacePath, { recursive: true });
@@ -5376,11 +5503,11 @@ class XiaoaiCloudPlugin {
         return normalized;
     }
 
-    private async disableOpenclawWorkspaceFile(
+    private async disableWorkspaceFile(
         workspacePath: string,
-        fileRef: OpenclawWorkspaceFileId | string
+        fileRef: WorkspaceFileId | string
     ) {
-        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        const definition = findWorkspaceFileDefinition(fileRef);
         if (!definition) {
             throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
         }
@@ -5406,13 +5533,13 @@ class XiaoaiCloudPlugin {
         await writeFile(filePath, "", "utf8");
     }
 
-    private async queryOpenclawWorkspaceFilesState(
+    private async queryWorkspaceFilesState(
         config: PluginConfig
-    ): Promise<ConsoleOpenclawWorkspaceState> {
-        const agentId = readString(config.openclawAgent) || "main";
+    ): Promise<ConsoleWorkspaceState> {
+        const agentId = readString(config.hermesAgent) || "main";
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
-        const workspacePath = this.resolveOpenclawAgentWorkspacePath(
+        const { agentConfig } = this.readAgentConfig(globalConfig, agentId);
+        const workspacePath = this.resolveAgentWorkspacePath(
             agentId,
             agentConfig,
             globalConfig
@@ -5420,27 +5547,27 @@ class XiaoaiCloudPlugin {
         return {
             agentId,
             files: await Promise.all(
-                OPENCLAW_WORKSPACE_FILE_DEFINITIONS.map((item) =>
-                    this.readOpenclawWorkspaceFileState(workspacePath, item.id)
+                WORKSPACE_FILE_DEFINITIONS.map((item) =>
+                    this.readWorkspaceFileState(workspacePath, item.id)
                 )
             ),
         };
     }
 
-    private async migrateLegacyOpenclawAudioToolPrompts(config: PluginConfig) {
-        const nextPrompt = normalizeOpenclawVoiceSystemPrompt(
+    private async migrateLegacyAudioToolPrompts(config: PluginConfig) {
+        const nextPrompt = normalizeVoiceSystemPrompt(
             DEFAULT_XIAOAI_AGENT_WORKSPACE_PROMPT,
             { fallbackToDefault: true }
         );
-        const toolsDefinition = findOpenclawWorkspaceFileDefinition("tools");
+        const toolsDefinition = findWorkspaceFileDefinition("tools");
         const nextToolsRule = toolsDefinition?.defaultContent || "";
 
         let nextConfig = config;
         let profilePromptMigrated = false;
-        if (looksLikeLegacyXiaoaiAgentWorkspacePrompt(config.openclawVoiceSystemPrompt)) {
+        if (looksLikeLegacyXiaoaiAgentWorkspacePrompt(config.voiceSystemPrompt)) {
             nextConfig = {
                 ...nextConfig,
-                openclawVoiceSystemPrompt: nextPrompt,
+                voiceSystemPrompt: nextPrompt,
             };
             profilePromptMigrated = true;
         }
@@ -5448,16 +5575,16 @@ class XiaoaiCloudPlugin {
         let workspacePromptMigrated = false;
         let workspaceToolsMigrated = false;
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir).catch(() => undefined);
-        const agentId = this.resolveManagedOpenclawAgentId(nextConfig, globalConfig);
-        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
-        const workspacePath = this.resolveOpenclawAgentWorkspacePath(
+        const agentId = this.resolveManagedAgentId(nextConfig, globalConfig);
+        const { agentConfig } = this.readAgentConfig(globalConfig, agentId);
+        const workspacePath = this.resolveAgentWorkspacePath(
             agentId,
             agentConfig,
             globalConfig
         );
 
         if (workspacePath) {
-            const agentsFile = await this.readOpenclawWorkspaceFileState(
+            const agentsFile = await this.readWorkspaceFileState(
                 workspacePath,
                 "agents"
             ).catch(() => undefined);
@@ -5465,11 +5592,11 @@ class XiaoaiCloudPlugin {
                 agentsFile?.enabled &&
                 looksLikeLegacyXiaoaiAgentWorkspacePrompt(agentsFile.content)
             ) {
-                await this.writeOpenclawWorkspaceFile(workspacePath, "agents", nextPrompt);
+                await this.writeWorkspaceFile(workspacePath, "agents", nextPrompt);
                 workspacePromptMigrated = true;
             }
 
-            const toolsFile = await this.readOpenclawWorkspaceFileState(
+            const toolsFile = await this.readWorkspaceFileState(
                 workspacePath,
                 "tools"
             ).catch(() => undefined);
@@ -5477,7 +5604,7 @@ class XiaoaiCloudPlugin {
                 toolsFile?.enabled &&
                 looksLikeLegacyXiaoaiToolsWorkspaceRule(toolsFile.content)
             ) {
-                await this.writeOpenclawWorkspaceFile(
+                await this.writeWorkspaceFile(
                     workspacePath,
                     "tools",
                     nextToolsRule
@@ -5492,7 +5619,7 @@ class XiaoaiCloudPlugin {
         }
 
         if (profilePromptMigrated || workspacePromptMigrated || workspaceToolsMigrated) {
-            await this.appendDebugTrace("openclaw_workspace_prompt_migrated", {
+            await this.appendDebugTrace("hermes_workspace_prompt_migrated", {
                 agentId,
                 profilePromptMigrated,
                 workspacePromptMigrated,
@@ -5503,7 +5630,7 @@ class XiaoaiCloudPlugin {
         return nextConfig;
     }
 
-    private readOpenclawResponsesEndpointEnabled(
+    private readResponsesEndpointEnabled(
         globalConfig: Record<string, any> | undefined
     ) {
         const raw = globalConfig?.gateway?.http?.endpoints?.responses;
@@ -5513,7 +5640,7 @@ class XiaoaiCloudPlugin {
         return readBoolean(raw?.enabled) ?? false;
     }
 
-    private async readOpenclawGatewayAuthState(): Promise<OpenclawGatewayAuthState> {
+    private async readGatewayAuthState(): Promise<GatewayAuthState> {
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const mode = readString(globalConfig?.gateway?.auth?.mode) || "token";
         const token =
@@ -5527,7 +5654,7 @@ class XiaoaiCloudPlugin {
                     "Gateway 当前是 password 鉴权，但配置里没有可用密码，暂时不能直连官方 HTTP/Gateway 接口。"
                 );
             }
-            throw new Error("缺少 OpenClaw Gateway token，暂时不能直连官方 HTTP/Gateway 接口。");
+            throw new Error("缺少 Hermes Gateway token，暂时不能直连官方 HTTP/Gateway 接口。");
         }
         return {
             mode,
@@ -5538,9 +5665,9 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async ensureOpenclawResponsesEndpointEnabled(config: PluginConfig) {
-        const authState = await this.readOpenclawGatewayAuthState();
-        if (this.readOpenclawResponsesEndpointEnabled(authState.globalConfig)) {
+    private async ensureResponsesEndpointEnabled(config: PluginConfig) {
+        const authState = await this.readGatewayAuthState();
+        if (this.readResponsesEndpointEnabled(authState.globalConfig)) {
             return {
                 enabled: true,
                 changed: false,
@@ -5550,17 +5677,17 @@ class XiaoaiCloudPlugin {
 
         await this.runCliCommand(
             [
-                config.openclawCliPath,
+                config.hermesCliPath,
                 "config",
                 "set",
                 "gateway.http.endpoints.responses.enabled",
                 "true",
                 "--strict-json",
             ],
-            "启用 OpenClaw Responses 端点",
+            "启用 Hermes Responses 端点",
             20_000
         );
-        this.scheduleGatewayRestart(config, "OpenClaw 网关重启");
+        this.scheduleGatewayRestart(config, "Hermes 网关重启");
         return {
             enabled: true,
             changed: true,
@@ -5575,7 +5702,7 @@ class XiaoaiCloudPlugin {
         this.pendingGatewayRestart = true;
         setTimeout(() => {
             void this.runCliCommand(
-                [config.openclawCliPath, "gateway", "restart"],
+                [config.hermesCliPath, "gateway", "restart"],
                 reason,
                 60_000
             )
@@ -5588,16 +5715,16 @@ class XiaoaiCloudPlugin {
         }, 240);
     }
 
-    private async updateOpenclawAgentModel(modelInput: string) {
-        const nextModel = normalizeOpenclawModelRef(modelInput);
+    private async updateAgentModel(modelInput: string) {
+        const nextModel = normalizeModelRef(modelInput);
         if (!nextModel) {
             throw new HttpError(400, "模型参数无效，请使用 provider/model 格式。");
         }
 
         const config = await this.loadConfig(false);
-        const agentId = readString(config.openclawAgent) || "main";
-        const modelState = await this.queryOpenclawAgentModelState(config).catch(
-            (): OpenclawAgentModelState => ({
+        const agentId = readString(config.hermesAgent) || "main";
+        const modelState = await this.queryAgentModelState(config).catch(
+            (): AgentModelState => ({
                 agentId,
                 model: undefined,
                 models: [],
@@ -5609,21 +5736,32 @@ class XiaoaiCloudPlugin {
         ) {
             throw new HttpError(
                 400,
-                `模型 ${nextModel} 不在当前 OpenClaw 配置里的可选列表中。`
+                `模型 ${nextModel} 不在当前 Hermes 配置里的可选列表中。`
             );
         }
 
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const agentsList = this.readOpenclawAgentListFromConfig(globalConfig);
-        const agentIndex = Array.isArray(agentsList)
+        let agentsList = this.readAgentListFromConfig(globalConfig);
+        let agentIndex = Array.isArray(agentsList)
             ? agentsList.findIndex((item) => readString(item?.id) === agentId)
             : -1;
+
+        // If not found in plugin config, check main config (where xiaoai agent lives)
+        let mainConfig: Record<string, any> | undefined;
         if (agentIndex < 0) {
-            throw new Error(`没有找到 id 为 ${agentId} 的 OpenClaw agent。`);
+            mainConfig = await readHermesMainConfig().catch(() => undefined);
+            agentsList = this.readAgentListFromConfig(mainConfig);
+            agentIndex = Array.isArray(agentsList)
+                ? agentsList.findIndex((item) => readString(item?.id) === agentId)
+                : -1;
+        }
+
+        if (agentIndex < 0) {
+            throw new Error(`没有找到 id 为 ${agentId} 的 Hermes agent。`);
         }
 
         const previousModel =
-            resolveConfiguredOpenclawModel(agentsList[agentIndex]?.model) ||
+            resolveConfiguredModel(agentsList?.[agentIndex]?.model) ||
             modelState.model;
         if (previousModel === nextModel) {
             return {
@@ -5635,19 +5773,21 @@ class XiaoaiCloudPlugin {
             };
         }
 
-        await this.runCliCommand(
-            [
-                config.openclawCliPath,
-                "config",
-                "set",
-                `agents.list[${agentIndex}].model`,
-                JSON.stringify(nextModel),
-                "--strict-json",
-            ],
-            "OpenClaw 模型写入",
-            20_000
-        );
-        this.scheduleGatewayRestart(config, "OpenClaw 网关重启");
+        // Update global model in Hermes main config
+        if (!mainConfig) {
+            mainConfig = await readHermesMainConfig().catch(() => undefined);
+        }
+        if (mainConfig) {
+            const parts = nextModel.split("/");
+            const providerId = parts[0];
+            const modelName = parts.slice(1).join("/") || nextModel;
+            if (!mainConfig.model) mainConfig.model = {};
+            mainConfig.model.default = modelName;
+            mainConfig.model.provider = providerId;
+            await writeHermesMainConfig(mainConfig);
+        }
+
+        this.scheduleGatewayRestart(config, "Hermes 网关重启");
         return {
             agentId,
             model: nextModel,
@@ -5657,26 +5797,26 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawAgentContextTokens(contextTokensInput: number) {
-        const nextContextTokens = normalizeOpenclawContextTokens(contextTokensInput);
+    private async updateAgentContextTokens(contextTokensInput: number) {
+        const nextContextTokens = normalizeContextTokens(contextTokensInput);
         if (typeof nextContextTokens !== "number") {
             throw new HttpError(400, "上下文窗口参数无效，必须是正整数。");
         }
 
         const config = await this.loadConfig(false);
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const agentId = this.resolveManagedOpenclawAgentId(config, globalConfig);
-        const { agentsList, agentIndex, agentConfig } = this.readOpenclawAgentConfig(
+        const agentId = this.resolveManagedAgentId(config, globalConfig);
+        const { agentsList, agentIndex, agentConfig } = this.readAgentConfig(
             globalConfig,
             agentId
         );
         if (agentIndex < 0 || !Array.isArray(agentsList)) {
-            throw new Error(`没有找到 id 为 ${agentId} 的 OpenClaw agent。`);
+            throw new Error(`没有找到 id 为 ${agentId} 的 Hermes agent。`);
         }
 
         const previousContextTokens =
-            this.resolveOpenclawAgentContextTokens(agentConfig, globalConfig);
-        const previousRawContextTokens = normalizeOpenclawContextTokens(
+            this.resolveAgentContextTokens(agentConfig, globalConfig);
+        const previousRawContextTokens = normalizeContextTokens(
             agentConfig?.contextTokens
         );
         const changed = previousRawContextTokens !== nextContextTokens;
@@ -5692,17 +5832,17 @@ class XiaoaiCloudPlugin {
 
         await this.runCliCommand(
             [
-                config.openclawCliPath,
+                config.hermesCliPath,
                 "config",
                 "set",
                 `agents.list[${agentIndex}].contextTokens`,
                 JSON.stringify(nextContextTokens),
                 "--strict-json",
             ],
-            "OpenClaw 上下文窗口写入",
+            "Hermes 上下文窗口写入",
             20_000
         );
-        this.scheduleGatewayRestart(config, "OpenClaw 网关重启");
+        this.scheduleGatewayRestart(config, "Hermes 网关重启");
         return {
             agentId,
             contextTokens: nextContextTokens,
@@ -5819,7 +5959,7 @@ class XiaoaiCloudPlugin {
 
     private async initialize() {
         let config = await this.loadConfig(true);
-        config = await this.migrateLegacyOpenclawAudioToolPrompts(config);
+        config = await this.migrateLegacyAudioToolPrompts(config);
         console.log(
             `[XiaoAI Cloud] 小米网络调试日志: ${config.debugLogPath} (${config.debugLogEnabled ? "已开启" : "已关闭"})`
         );
@@ -5870,13 +6010,10 @@ class XiaoaiCloudPlugin {
             listenHost: config.authListenHost,
             port: config.authPort,
             publicBaseUrl: config.publicBaseUrl,
-            routeBasePath:
-                typeof this.api?.registerHttpRoute === "function"
-                    ? config.authRoutePath
-                    : undefined,
+            routeBasePath: config.authRoutePath,
             gatewayBaseUrls,
             baseUrlHints: this.observedGatewayAuthBaseUrls,
-            standaloneOptional: typeof this.api?.registerHttpRoute === "function",
+            standaloneOptional: true,
             onPasswordDiscover: async (sessionId, payload) =>
                 this.handlePasswordDiscover(sessionId, payload),
             onPasswordLogin: async (sessionId, payload) =>
@@ -6139,12 +6276,12 @@ class XiaoaiCloudPlugin {
                 });
                 return true;
             }
-            if (requestMethod === "GET" && action === "openclaw/model") {
-                sendJson(response, 200, await this.queryOpenclawAgentModelState(config));
+            if (requestMethod === "GET" && action === "hermes/model") {
+                sendJson(response, 200, await this.queryAgentModelState(config));
                 return true;
             }
-            if (requestMethod === "GET" && action === "openclaw/route") {
-                sendJson(response, 200, await this.buildConsoleOpenclawRouteState(config));
+            if (requestMethod === "GET" && action === "hermes/route") {
+                sendJson(response, 200, await this.buildConsoleNotificationRouteState(config));
                 return true;
             }
             if (requestMethod === "POST" && action === "chat/send") {
@@ -6166,7 +6303,7 @@ class XiaoaiCloudPlugin {
                     "success"
                 );
                 const conversation = await this.waitForConversationResult(text, startedAt, 15000, {
-                    preferOpenclaw: this.shouldInterceptQuery(text),
+                    preferHermes: this.shouldInterceptQuery(text),
                 });
                 sendJson(response, 200, {
                     ok: true,
@@ -6638,21 +6775,21 @@ class XiaoaiCloudPlugin {
                 });
                 return true;
             }
-            if (requestMethod === "POST" && action === "openclaw/thinking") {
+            if (requestMethod === "POST" && action === "hermes/thinking") {
                 const body = await readJsonBody(request);
                 const thinkingEnabled = readBoolean(body?.thinkingEnabled);
                 const enabled = readBoolean(
                     typeof thinkingEnabled === "boolean"
                         ? !thinkingEnabled
-                        : body?.enabled ?? body?.thinkingOff ?? body?.openclawThinkingOff
+                        : body?.enabled ?? body?.thinkingOff ?? body?.thinkingOff
                 );
                 if (typeof enabled !== "boolean") {
                     sendJson(response, 400, { error: "开关参数无效。" });
                     return true;
                 }
-                const result = await this.updateOpenclawThinkingOff(enabled);
+                const result = await this.updateThinkingOff(enabled);
                 await this.appendConsoleEvent(
-                    "console.openclaw_thinking",
+                    "console.hermes_thinking",
                     "控制台修改思考模式",
                     result.enabled
                         ? "已关闭思考"
@@ -6673,20 +6810,20 @@ class XiaoaiCloudPlugin {
                 });
                 return true;
             }
-            if (requestMethod === "POST" && action === "openclaw/non-streaming") {
+            if (requestMethod === "POST" && action === "hermes/non-streaming") {
                 const body = await readJsonBody(request);
                 const enabled = readBoolean(
                     body?.enabled ??
                         body?.forceNonStreamingEnabled ??
-                        body?.openclawForceNonStreaming
+                        body?.forceNonStreaming
                 );
                 if (typeof enabled !== "boolean") {
                     sendJson(response, 400, { error: "非流式开关参数无效。" });
                     return true;
                 }
-                const result = await this.updateOpenclawForceNonStreaming(enabled);
+                const result = await this.updateForceNonStreaming(enabled);
                 await this.appendConsoleEvent(
-                    "console.openclaw_non_streaming",
+                    "console.hermes_non_streaming",
                     "控制台修改非流式请求",
                     result.enabled ? "已开启强制非流式" : "已关闭强制非流式",
                     result.enabled ? "success" : "warn"
@@ -6697,42 +6834,71 @@ class XiaoaiCloudPlugin {
                     restarting: result.restarting,
                     message: result.enabled
                         ? result.endpointChanged
-                            ? "已开启强制非流式，正在自动启用 OpenClaw /v1/responses 并重启网关。"
-                            : "已开启强制非流式，后续会改走 OpenClaw 官方 /v1/responses 非流式接口。"
+                            ? "已开启强制非流式，正在自动启用 Hermes /v1/responses 并重启网关。"
+                            : "已开启强制非流式，后续会改走 Hermes 官方 /v1/responses 非流式接口。"
                         : "已关闭强制非流式，后续恢复默认流式 agent 请求。",
                 });
                 return true;
             }
-            if (requestMethod === "POST" && action === "openclaw/model") {
+            if (requestMethod === "POST" && action === "hermes/model") {
                 const body = await readJsonBody(request);
-                const model = readString(body?.model ?? body?.ref);
-                if (!model) {
+                const modelRef = readString(body?.model ?? body?.ref);
+                if (!modelRef) {
                     sendJson(response, 400, { error: "请选择要切换到的模型。" });
                     return true;
                 }
-                const result = await this.updateOpenclawAgentModel(model);
+
+                // Parse provider/model format
+                const parts = modelRef.split("/");
+                const providerId = parts[0];
+                const modelName = parts.slice(1).join("/") || modelRef;
+
+                // Look up provider API info from Hermes main config
+                const hermesConfig = await readHermesMainConfig().catch(() => undefined);
+                const apiInfo = getHermesModelApiInfo(hermesConfig, modelRef);
+
+                // Update XiaoAI config
+                const currentConfig = await this.loadConfig(false);
+                const previousModel = currentConfig.llmModel || "未设置";
+                const updates: Record<string, string> = { llmModel: modelName };
+                if (apiInfo?.apiUrl) {
+                    updates.llmApiUrl = apiInfo.apiUrl;
+                }
+                if (apiInfo?.apiKey) {
+                    updates.llmApiKey = apiInfo.apiKey;
+                }
+                await this.persistConfigUpdates(updates);
+
+                // Update global model in Hermes main config (model.default + model.provider)
+                try {
+                    const mainConfig = await readHermesMainConfig();
+                    if (mainConfig) {
+                        if (!mainConfig.model) mainConfig.model = {};
+                        mainConfig.model.default = modelName;
+                        mainConfig.model.provider = providerId;
+                        await writeHermesMainConfig(mainConfig);
+                        this.scheduleGatewayRestart(config, "模型切换后重启 Hermes 网关");
+                    }
+                } catch (e) {
+                    console.warn(`[xiaoai] Failed to update Hermes global model: ${e}`);
+                }
+
                 await this.appendConsoleEvent(
-                    "console.openclaw_model",
-                    "控制台切换 OpenClaw 模型",
-                    result.changed
-                        ? `${result.agentId}: ${result.previousModel || "未设置"} -> ${result.model}`
-                        : `${result.agentId}: ${result.model}`,
+                    "console.hermes_model",
+                    "控制台切换模型",
+                    `${previousModel} -> ${providerId}/${modelName}`,
                     "success"
                 );
                 sendJson(response, 200, {
                     ok: true,
-                    agentId: result.agentId,
-                    model: result.model,
-                    restarting: result.restarting,
-                    message: result.changed
-                        ? `模型已切换为 ${result.model}，网关正在自动重启。`
-                        : `当前模型已经是 ${result.model}。`,
+                    model: modelRef,
+                    message: `模型已切换为 ${providerId}/${modelName}。`,
                 });
                 return true;
             }
-            if (requestMethod === "POST" && action === "openclaw/route") {
+            if (requestMethod === "POST" && action === "hermes/route") {
                 const body = await readJsonBody(request);
-                const result = await this.updateOpenclawNotificationRoute({
+                const result = await this.updateNotificationRoute({
                     channel: body?.channel,
                     target: body?.target,
                     disableNotification:
@@ -6740,11 +6906,11 @@ class XiaoaiCloudPlugin {
                         body?.disabled ??
                         body?.enabled === false,
                 });
-                const routeState = await this.buildConsoleOpenclawRouteState(
+                const routeState = await this.buildConsoleNotificationRouteState(
                     this.config || config
                 );
                 await this.appendConsoleEvent(
-                    "console.openclaw_route",
+                    "console.hermes_route",
                     "控制台修改通知渠道",
                     result.enabled
                         ? `${result.previousChannel}/${result.previousTarget || "未配置"} -> ${result.channel}/${result.target || "未配置"}`
@@ -6789,8 +6955,8 @@ class XiaoaiCloudPlugin {
             }
             if (
                 requestMethod === "POST" &&
-                (action === "openclaw/context-tokens" ||
-                    action === "openclaw/voice-context")
+                (action === "hermes/context-tokens" ||
+                    action === "hermes/voice-context")
             ) {
                 const body = await readJsonBody(request);
                 const contextTokens = readNumber(
@@ -6800,11 +6966,11 @@ class XiaoaiCloudPlugin {
                     sendJson(response, 400, { error: "上下文窗口参数无效。" });
                     return true;
                 }
-                const result = await this.updateOpenclawAgentContextTokens(
+                const result = await this.updateAgentContextTokens(
                     contextTokens
                 );
                 await this.appendConsoleEvent(
-                    "console.openclaw_context_tokens",
+                    "console.hermes_context_tokens",
                     "控制台修改 xiaoai agent 上下文窗口",
                     `${result.agentId}: ${result.previousContextTokens || "未设置"} -> ${result.contextTokens}`,
                     "success"
@@ -6820,16 +6986,16 @@ class XiaoaiCloudPlugin {
                 });
                 return true;
             }
-            if (requestMethod === "POST" && action === "openclaw/voice-system-prompt") {
+            if (requestMethod === "POST" && action === "hermes/voice-system-prompt") {
                 const body = await readJsonBody(request);
-                const result = await this.updateOpenclawVoiceSystemPrompt(
+                const result = await this.updateVoiceSystemPrompt(
                     typeof body?.prompt === "string"
                         ? body.prompt
-                        : body?.openclawVoiceSystemPrompt
+                        : body?.voiceSystemPrompt
                 );
                 await this.appendConsoleEvent(
                     "console.voice_system_prompt",
-                    "控制台修改 OpenClaw 系统提示词",
+                    "控制台修改 Hermes 系统提示词",
                     result.customized ? "已更新自定义提示词" : "已恢复默认提示词",
                     "success"
                 );
@@ -6839,17 +7005,17 @@ class XiaoaiCloudPlugin {
                     customized: result.customized,
                     message: result.changed
                         ? result.customized
-                            ? `已写入 xiaoai agent workspace 的 ${OPENCLAW_AGENT_PROMPT_FILENAME}。新会话会按新的提示词执行。`
-                            : `已恢复 xiaoai agent workspace 的默认 ${OPENCLAW_AGENT_PROMPT_FILENAME} 内容。`
+                            ? `已写入 xiaoai agent workspace 的 ${AGENT_PROMPT_FILENAME}。新会话会按新的提示词执行。`
+                            : `已恢复 xiaoai agent workspace 的默认 ${AGENT_PROMPT_FILENAME} 内容。`
                         : result.customized
-                            ? `当前 xiaoai agent workspace 的自定义 ${OPENCLAW_AGENT_PROMPT_FILENAME} 保持不变。`
-                            : `当前 xiaoai agent workspace 已在使用默认 ${OPENCLAW_AGENT_PROMPT_FILENAME} 内容。`,
+                            ? `当前 xiaoai agent workspace 的自定义 ${AGENT_PROMPT_FILENAME} 保持不变。`
+                            : `当前 xiaoai agent workspace 已在使用默认 ${AGENT_PROMPT_FILENAME} 内容。`,
                 });
                 return true;
             }
-            if (requestMethod === "POST" && action === "openclaw/workspace-file") {
+            if (requestMethod === "POST" && action === "hermes/workspace-file") {
                 const body = await readJsonBody(request);
-                const result = await this.updateOpenclawWorkspaceFile(
+                const result = await this.updateWorkspaceFile(
                     body?.file ?? body?.filename ?? body?.id,
                     {
                         content:
@@ -7026,6 +7192,13 @@ class XiaoaiCloudPlugin {
             );
         }
 
+        if (matchedPath.startsWith("/auth/")) {
+            const portal = await this.ensureLoginPortal();
+            if (await portal.handleHttpRoute(request, response)) {
+                return true;
+            }
+        }
+
         return false;
     }
 
@@ -7178,11 +7351,11 @@ class XiaoaiCloudPlugin {
             "",
             "这个临时入口默认只保留一小段时间，建议在自己的私聊里完成登录，不要转发到群聊。",
             "",
-            "登录完成后插件会自动继续初始化，不需要重启 OpenClaw。",
+            "登录完成后插件会自动继续初始化，不需要重启 Hermes。",
         ].filter((item): item is string => Boolean(item));
 
         try {
-            await this.sendOpenclawNotification(lines.join("\n"), "登录通知");
+            await this.sendNotification(lines.join("\n"), "登录通知");
             this.loginNotificationSessionId = session.id;
         } catch (error) {
             console.error(
@@ -7197,7 +7370,7 @@ class XiaoaiCloudPlugin {
     private async notifyLoginSuccess(device: DeviceContext) {
         try {
             const consoleUrl = await this.getConsoleEntryUrl().catch(() => undefined);
-            await this.sendOpenclawNotification(
+            await this.sendNotification(
                 [
                     "小爱直连登录已经完成。",
                     `设备：${device.name} (${device.hardware}/${device.model})`,
@@ -7264,7 +7437,7 @@ class XiaoaiCloudPlugin {
             this.pollingStartedAt,
             this.lastConversationTimestamp,
             Math.round(this.lastDialogWindowOpenedAt * 1000),
-            Math.round(this.lastOpenclawSpeakTime * 1000)
+            Math.round(this.lastSpeakTime * 1000)
         );
     }
 
@@ -7326,8 +7499,8 @@ class XiaoaiCloudPlugin {
 
     private armDialogWindow(nowSeconds = Date.now() / 1000) {
         this.lastDialogWindowOpenedAt = nowSeconds;
-        this.openclawVoiceSessionExpiresAt = Math.max(
-            this.openclawVoiceSessionExpiresAt,
+        this.voiceSessionExpiresAt = Math.max(
+            this.voiceSessionExpiresAt,
             (nowSeconds + this.continuousDialogWindow + 2) * 1000
         );
         this.armFastPolling(
@@ -7370,8 +7543,8 @@ class XiaoaiCloudPlugin {
         this.activeVoiceAgentRuns = [];
         this.pendingAgentPromptCount = 0;
         if (!preserveVoiceSession) {
-            this.openclawVoiceSessionKey = undefined;
-            this.openclawVoiceSessionExpiresAt = 0;
+            this.voiceSessionKey = undefined;
+            this.voiceSessionExpiresAt = 0;
             this.voiceContextTurns = [];
             this.voiceContextArchiveSessionKey = undefined;
             this.voiceContextArchiveText = "";
@@ -7950,22 +8123,22 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawNotificationRoute(input: {
+    private async updateNotificationRoute(input: {
         channel?: string;
         target?: string;
         disableNotification?: boolean;
     }) {
         const config = await this.loadConfig(false);
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const previousChannel = readString(config.openclawChannel) || "telegram";
-        const previousTarget = readString(config.openclawTo);
+        const previousChannel = readString(config.notificationChannel) || "telegram";
+        const previousTarget = readString(config.notificationTarget);
         const previousEnabled =
-            config.openclawNotificationsDisabled !== true && Boolean(previousTarget);
+            config.notificationsDisabled !== true && Boolean(previousTarget);
         const disableNotification = readBoolean(input.disableNotification) === true;
         const nextChannel =
             readString(input.channel)?.toLowerCase() ||
             previousChannel ||
-            inferConfiguredOpenclawChannel(globalConfig) ||
+            inferConfiguredChannel(globalConfig) ||
             "telegram";
 
         if (!nextChannel) {
@@ -7977,7 +8150,7 @@ class XiaoaiCloudPlugin {
             const explicitTarget = readString(input.target);
             nextTarget =
                 explicitTarget ||
-                inferOpenclawNotificationTarget(globalConfig, nextChannel);
+                inferNotificationTarget(globalConfig, nextChannel);
             if (!nextTarget) {
                 throw new HttpError(
                     400,
@@ -7988,9 +8161,9 @@ class XiaoaiCloudPlugin {
 
         const nextConfig: PluginConfig = {
             ...config,
-            openclawChannel: nextChannel,
-            openclawTo: nextTarget,
-            openclawNotificationsDisabled: disableNotification,
+            notificationChannel: nextChannel,
+            notificationTarget: nextTarget,
+            notificationsDisabled: disableNotification,
         };
         this.config = nextConfig;
         await this.persistResolvedProfile(nextConfig, this.device, true);
@@ -8009,13 +8182,13 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawThinkingOff(enabledInput: boolean) {
+    private async updateThinkingOff(enabledInput: boolean) {
         const config = await this.loadConfig(false);
-        const previousEnabled = config.openclawThinkingOff;
+        const previousEnabled = config.thinkingOff;
         const nextEnabled = Boolean(enabledInput);
         const nextConfig: PluginConfig = {
             ...config,
-            openclawThinkingOff: nextEnabled,
+            thinkingOff: nextEnabled,
         };
         this.config = nextConfig;
         await this.persistResolvedProfile(nextConfig, this.device, true);
@@ -8026,22 +8199,22 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawForceNonStreaming(enabledInput: boolean) {
+    private async updateForceNonStreaming(enabledInput: boolean) {
         const config = await this.loadConfig(false);
-        const previousEnabled = config.openclawForceNonStreaming;
+        const previousEnabled = config.forceNonStreaming;
         const nextEnabled = Boolean(enabledInput);
         let endpointChanged = false;
         let restarting = false;
 
         if (nextEnabled) {
-            const endpointResult = await this.ensureOpenclawResponsesEndpointEnabled(config);
+            const endpointResult = await this.ensureResponsesEndpointEnabled(config);
             endpointChanged = endpointResult.changed;
             restarting = endpointResult.restarting;
         }
 
         const nextConfig: PluginConfig = {
             ...config,
-            openclawForceNonStreaming: nextEnabled,
+            forceNonStreaming: nextEnabled,
         };
         this.config = nextConfig;
         await this.persistResolvedProfile(nextConfig, this.device, true);
@@ -8054,44 +8227,44 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawWorkspaceFile(
-        fileRef: OpenclawWorkspaceFileId | string,
+    private async updateWorkspaceFile(
+        fileRef: WorkspaceFileId | string,
         options?: {
             content?: string;
             enabled?: boolean;
         }
     ) {
-        const definition = findOpenclawWorkspaceFileDefinition(fileRef);
+        const definition = findWorkspaceFileDefinition(fileRef);
         if (!definition) {
             throw new Error(`不支持的 workspace 文件: ${String(fileRef || "")}`);
         }
         const config = await this.loadConfig(false);
-        const agentId = readString(config.openclawAgent) || "main";
+        const agentId = readString(config.hermesAgent) || "main";
         const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
-        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
+        const { agentConfig } = this.readAgentConfig(globalConfig, agentId);
         if (!agentConfig) {
-            throw new Error(`没有找到 id 为 ${agentId} 的 OpenClaw agent。`);
+            throw new Error(`没有找到 id 为 ${agentId} 的 Hermes agent。`);
         }
-        const workspacePath = this.resolveOpenclawAgentWorkspacePath(
+        const workspacePath = this.resolveAgentWorkspacePath(
             agentId,
             agentConfig,
             globalConfig
         );
         if (!workspacePath) {
             throw new Error(
-                `没有找到 id 为 ${agentId} 的 OpenClaw agent workspace，暂时不能写入 ${definition.filename}。`
+                `没有找到 id 为 ${agentId} 的 Hermes agent workspace，暂时不能写入 ${definition.filename}。`
             );
         }
 
-        const previousFile = await this.readOpenclawWorkspaceFileState(
+        const previousFile = await this.readWorkspaceFileState(
             workspacePath,
             definition.id
         );
         const requestedEnabled = typeof options?.enabled === "boolean" ? options.enabled : true;
 
         if (!requestedEnabled) {
-            await this.disableOpenclawWorkspaceFile(workspacePath, definition.id);
-            const file = await this.readOpenclawWorkspaceFileState(workspacePath, definition.id);
+            await this.disableWorkspaceFile(workspacePath, definition.id);
+            const file = await this.readWorkspaceFileState(workspacePath, definition.id);
             return {
                 file,
                 previousFile,
@@ -8100,7 +8273,7 @@ class XiaoaiCloudPlugin {
             };
         }
 
-        const normalizedContent = await this.writeOpenclawWorkspaceFile(
+        const normalizedContent = await this.writeWorkspaceFile(
             workspacePath,
             definition.id,
             options?.content ?? ""
@@ -8108,12 +8281,12 @@ class XiaoaiCloudPlugin {
         if (definition.id === "agents") {
             const nextConfig: PluginConfig = {
                 ...config,
-                openclawVoiceSystemPrompt: normalizedContent,
+                voiceSystemPrompt: normalizedContent,
             };
             this.config = nextConfig;
             await this.persistResolvedProfile(nextConfig, this.device, true);
         }
-        const file = await this.readOpenclawWorkspaceFileState(workspacePath, definition.id);
+        const file = await this.readWorkspaceFileState(workspacePath, definition.id);
         return {
             file,
             previousFile,
@@ -8125,8 +8298,8 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async updateOpenclawVoiceSystemPrompt(promptInput: string | undefined) {
-        const result = await this.updateOpenclawWorkspaceFile("agents", {
+    private async updateVoiceSystemPrompt(promptInput: string | undefined) {
+        const result = await this.updateWorkspaceFile("agents", {
             content: promptInput,
             enabled: true,
         });
@@ -8210,7 +8383,7 @@ class XiaoaiCloudPlugin {
         } else if (this.voiceContextTurns.length > nextTurns) {
             const overflowTurns = this.voiceContextTurns.slice(0, this.voiceContextTurns.length - nextTurns);
             this.mergeVoiceContextArchive(
-                this.openclawVoiceSessionKey,
+                this.voiceSessionKey,
                 overflowTurns,
                 nextChars
             );
@@ -9022,7 +9195,7 @@ class XiaoaiCloudPlugin {
                 {
                     const renewVoiceSession = this.shouldStartNewVoiceSession(query);
                     if (renewVoiceSession) {
-                        console.log("   [会话] 检测到显式新会话请求，将切换到新的 OpenClaw 会话");
+                        console.log("   [会话] 检测到显式新会话请求，将切换到新的 Hermes 会话");
                     }
                     await this.interceptAndForward(query, {
                         renewVoiceSession,
@@ -9046,7 +9219,7 @@ class XiaoaiCloudPlugin {
                         `   [唤醒] 捕获: "${query}" (唤醒词: ${isWakeWordTriggered}, 免唤醒: ${isContinuousDialog})`
                     );
                     if (renewVoiceSession) {
-                        console.log("   [会话] 检测到显式新会话请求，将切换到新的 OpenClaw 会话");
+                        console.log("   [会话] 检测到显式新会话请求，将切换到新的 Hermes 会话");
                     }
                     await this.interceptAndForward(query, {
                         renewVoiceSession,
@@ -9197,46 +9370,46 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private hasActiveOpenclawVoiceSession() {
-        return Boolean(this.openclawVoiceSessionKey);
+    private hasActiveVoiceSession() {
+        return Boolean(this.voiceSessionKey);
     }
 
-    private buildOpenclawVoiceSessionKey(token?: string) {
-        const agentId = readString(this.config?.openclawAgent) || "main";
+    private buildVoiceSessionKey(token?: string) {
+        const agentId = readString(this.config?.hermesAgent) || "main";
         const baseKey = `agent:${agentId}:xiaoai-voice`;
         return token ? `${baseKey}:${token}` : baseKey;
     }
 
-    private resetOpenclawVoiceSession(options?: { fresh?: boolean }) {
+    private resetVoiceSession(options?: { fresh?: boolean }) {
         const token = options?.fresh
             ? `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`
             : undefined;
-        this.openclawVoiceSessionKey = this.buildOpenclawVoiceSessionKey(token);
-        this.openclawVoiceSessionExpiresAt = 0;
+        this.voiceSessionKey = this.buildVoiceSessionKey(token);
+        this.voiceSessionExpiresAt = 0;
         this.voiceContextTurns = [];
         this.voiceContextArchiveSessionKey = undefined;
         this.voiceContextArchiveText = "";
     }
 
-    private resolveOpenclawVoiceSessionKey(forceNew = false) {
+    private resolveVoiceSessionKey(forceNew = false) {
         const nowSeconds = Date.now() / 1000;
-        const baseSessionKey = this.buildOpenclawVoiceSessionKey();
+        const baseSessionKey = this.buildVoiceSessionKey();
         const baseSessionPrefix = `${baseSessionKey}:`;
         const hasCompatibleSessionKey = Boolean(
-            this.openclawVoiceSessionKey &&
-                (this.openclawVoiceSessionKey === baseSessionKey ||
-                    this.openclawVoiceSessionKey.startsWith(baseSessionPrefix))
+            this.voiceSessionKey &&
+                (this.voiceSessionKey === baseSessionKey ||
+                    this.voiceSessionKey.startsWith(baseSessionPrefix))
         );
         if (forceNew) {
-            this.resetOpenclawVoiceSession({ fresh: true });
-        } else if (!hasCompatibleSessionKey || !this.hasActiveOpenclawVoiceSession()) {
-            this.resetOpenclawVoiceSession();
+            this.resetVoiceSession({ fresh: true });
+        } else if (!hasCompatibleSessionKey || !this.hasActiveVoiceSession()) {
+            this.resetVoiceSession();
         }
-        this.openclawVoiceSessionExpiresAt = Math.max(
-            this.openclawVoiceSessionExpiresAt,
+        this.voiceSessionExpiresAt = Math.max(
+            this.voiceSessionExpiresAt,
             (nowSeconds + this.continuousDialogWindow + 2) * 1000
         );
-        return this.openclawVoiceSessionKey as string;
+        return this.voiceSessionKey as string;
     }
 
     private compressVoiceContextTurns(turns: VoiceContextTurn[], maxChars: number) {
@@ -9276,7 +9449,7 @@ class XiaoaiCloudPlugin {
     private recordVoiceContextTurn(
         role: VoiceContextTurn["role"],
         text: string,
-        sessionKey = this.openclawVoiceSessionKey
+        sessionKey = this.voiceSessionKey
     ) {
         void role;
         void text;
@@ -13594,8 +13767,8 @@ class XiaoaiCloudPlugin {
             deferUntilSilenced: true,
             reason:
                 strategy === "fallback-only"
-                    ? "当前设备/网络画像通常只能拿到晚记录，本轮会先立即强拦截，确认静音后马上转发 OpenClaw 播报"
-                    : `检测到会话记录已晚到 ${recordAgeMs}ms，本轮会先立即强拦截，确认静音后马上转发 OpenClaw 播报`,
+                    ? "当前设备/网络画像通常只能拿到晚记录，本轮会先立即强拦截，确认静音后马上转发 Hermes 播报"
+                    : `检测到会话记录已晚到 ${recordAgeMs}ms，本轮会先立即强拦截，确认静音后马上转发 Hermes 播报`,
         };
     }
 
@@ -14476,7 +14649,7 @@ class XiaoaiCloudPlugin {
         }).catch(() => undefined);
     }
 
-    private readOpenclawRuntimeTtsBuffer(result: any) {
+    private readRuntimeTtsBuffer(result: any) {
         if (Buffer.isBuffer(result?.audioBuffer)) {
             return result.audioBuffer;
         }
@@ -14581,7 +14754,7 @@ class XiaoaiCloudPlugin {
             return {
                 audioBuffer,
                 audioExtension:
-                    this.normalizeOpenclawRuntimeAudioExtension(path.extname(fileName)) ||
+                    this.normalizeRuntimeAudioExtension(path.extname(fileName)) ||
                     ".mp3",
                 cacheHit: true,
             } satisfies GeneratedAudioAsset;
@@ -14597,7 +14770,7 @@ class XiaoaiCloudPlugin {
     ) {
         const cacheDir = await this.getTtsBridgeCacheDir();
         const normalizedExtension =
-            this.normalizeOpenclawRuntimeAudioExtension(extension) || ".mp3";
+            this.normalizeRuntimeAudioExtension(extension) || ".mp3";
         const fileName = `${cacheKey}${normalizedExtension}`;
         const filePath = path.join(cacheDir, fileName);
         const names = await readdir(cacheDir).catch(() => []);
@@ -14615,7 +14788,7 @@ class XiaoaiCloudPlugin {
         return filePath;
     }
 
-    private isOpenclawRuntimeTtsSuccessResult(result: any) {
+    private isRuntimeTtsSuccessResult(result: any) {
         return (
             Buffer.isBuffer(result) ||
             result instanceof Uint8Array ||
@@ -14623,7 +14796,7 @@ class XiaoaiCloudPlugin {
         );
     }
 
-    private normalizeOpenclawRuntimeAudioExtension(value: string | undefined) {
+    private normalizeRuntimeAudioExtension(value: string | undefined) {
         const rawValue = readString(value);
         const normalized = rawValue ? rawValue.trim().toLowerCase() : "";
         if (!normalized) {
@@ -14662,18 +14835,18 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private resolveOpenclawRuntimeTtsExtension(result: any, audioPath?: string) {
+    private resolveRuntimeTtsExtension(result: any, audioPath?: string) {
         return (
-            this.normalizeOpenclawRuntimeAudioExtension(readString(result?.fileExtension)) ||
-            this.normalizeOpenclawRuntimeAudioExtension(readString(result?.outputFormat)) ||
-            this.normalizeOpenclawRuntimeAudioExtension(
+            this.normalizeRuntimeAudioExtension(readString(result?.fileExtension)) ||
+            this.normalizeRuntimeAudioExtension(readString(result?.outputFormat)) ||
+            this.normalizeRuntimeAudioExtension(
                 audioPath ? path.extname(audioPath).toLowerCase() : undefined
             ) ||
             ".mp3"
         );
     }
 
-    private formatOpenclawRuntimeTtsFailure(result: any, fallbackMessage: string) {
+    private formatRuntimeTtsFailure(result: any, fallbackMessage: string) {
         const error = readString(result?.error);
         const provider = readString(result?.provider);
         const attemptsSummary = Array.isArray(result?.attempts)
@@ -14702,7 +14875,7 @@ class XiaoaiCloudPlugin {
             error ||
             (reasonCodes.includes("not_configured") ||
             reasonCodes.includes("no_provider_registered")
-                ? "OpenClaw runtime TTS 尚未配置可用的语音提供方。"
+                ? "Hermes runtime TTS 尚未配置可用的语音提供方。"
                 : "");
 
         return [
@@ -14714,38 +14887,38 @@ class XiaoaiCloudPlugin {
             .join(" | ");
     }
 
-    private async readOpenclawRuntimeTtsFile(audioPath: string) {
+    private async readRuntimeTtsFile(audioPath: string) {
         try {
             const buffer = await readFile(audioPath);
             if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
-                throw new Error("OpenClaw runtime 生成的音频文件为空。");
+                throw new Error("Hermes runtime 生成的音频文件为空。");
             }
             return buffer;
         } catch (error) {
             throw new Error(
-                `无法读取 OpenClaw runtime TTS 输出文件 (${audioPath}): ${this.errorMessage(error)}`
+                `无法读取 Hermes runtime TTS 输出文件 (${audioPath}): ${this.errorMessage(error)}`
             );
         } finally {
             unlink(audioPath).catch(() => undefined);
         }
     }
 
-    private async resolveOpenclawRuntimeTtsAudio(result: any, failureMessage: string) {
-        let audioBuffer = this.readOpenclawRuntimeTtsBuffer(result);
+    private async resolveRuntimeTtsAudio(result: any, failureMessage: string) {
+        let audioBuffer = this.readRuntimeTtsBuffer(result);
         const audioPath = readString(result?.audioPath);
 
         if ((!audioBuffer || audioBuffer.length === 0) && audioPath) {
-            audioBuffer = await this.readOpenclawRuntimeTtsFile(audioPath);
+            audioBuffer = await this.readRuntimeTtsFile(audioPath);
         }
         if (!audioBuffer || audioBuffer.length === 0) {
             throw new Error(
-                this.formatOpenclawRuntimeTtsFailure(result, failureMessage)
+                this.formatRuntimeTtsFailure(result, failureMessage)
             );
         }
 
         return {
             audioBuffer,
-            audioExtension: this.resolveOpenclawRuntimeTtsExtension(result, audioPath),
+            audioExtension: this.resolveRuntimeTtsExtension(result, audioPath),
         };
     }
 
@@ -14780,7 +14953,7 @@ class XiaoaiCloudPlugin {
             );
             if (resolved.length === 0) {
                 throw new Error(
-                    "当前没有可供音箱访问的音频入口。请配置 audioPublicBaseUrl，或让 OpenClaw 网关通过局域网地址可被音箱直接访问。"
+                    "当前没有可供音箱访问的音频入口。请配置 audioPublicBaseUrl，或让 Hermes 网关通过局域网地址可被音箱直接访问。"
                 );
             }
             return resolved;
@@ -14866,7 +15039,7 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private async generateOpenclawTtsAsset(text: string): Promise<GeneratedAudioAsset> {
+    private async generateTtsAsset(text: string): Promise<GeneratedAudioAsset> {
         const ttsRuntime = this.api?.runtime?.tts as
             | {
                   textToSpeech?: (params: {
@@ -14898,7 +15071,7 @@ class XiaoaiCloudPlugin {
         );
 
         if (ttsMethods.length === 0) {
-            throw new Error("当前 OpenClaw runtime 没有暴露官方 TTS 能力。");
+            throw new Error("当前 Hermes runtime 没有暴露官方 TTS 能力。");
         }
 
         let audioBuffer: Buffer | undefined;
@@ -14911,17 +15084,17 @@ class XiaoaiCloudPlugin {
                     text,
                     cfg: this.api?.config,
                 });
-                if (!this.isOpenclawRuntimeTtsSuccessResult(result)) {
+                if (!this.isRuntimeTtsSuccessResult(result)) {
                     throw new Error(
-                        this.formatOpenclawRuntimeTtsFailure(
+                        this.formatRuntimeTtsFailure(
                             result,
-                            `OpenClaw runtime TTS (${method.name}) 合成失败。`
+                            `Hermes runtime TTS (${method.name}) 合成失败。`
                         )
                     );
                 }
-                const resolved = await this.resolveOpenclawRuntimeTtsAudio(
+                const resolved = await this.resolveRuntimeTtsAudio(
                     result,
-                    `OpenClaw runtime TTS (${method.name}) 没有返回可播放的音频数据。`
+                    `Hermes runtime TTS (${method.name}) 没有返回可播放的音频数据。`
                 );
                 audioBuffer = resolved.audioBuffer;
                 audioExtension = resolved.audioExtension;
@@ -14945,7 +15118,7 @@ class XiaoaiCloudPlugin {
         if (!audioBuffer || audioBuffer.length === 0) {
             throw new Error(
                 [
-                    "OpenClaw runtime TTS 合成失败。",
+                    "Hermes runtime TTS 合成失败。",
                     failures.length > 0 ? failures.join(" | ") : undefined,
                 ]
                     .filter(Boolean)
@@ -14960,7 +15133,7 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async getOrCreateOpenclawTtsAsset(text: string) {
+    private async getOrCreateTtsAsset(text: string) {
         const normalizedText = text.trim();
         const cacheKey = this.buildTtsBridgeCacheKey(normalizedText);
         const cached = await this.readTtsBridgeCachedAsset(cacheKey);
@@ -14983,7 +15156,7 @@ class XiaoaiCloudPlugin {
                     return cachedAfterPrune;
                 }
 
-                const generated = await this.generateOpenclawTtsAsset(normalizedText);
+                const generated = await this.generateTtsAsset(normalizedText);
                 await this.persistTtsBridgeCachedAsset(
                     cacheKey,
                     generated.audioExtension,
@@ -15005,17 +15178,17 @@ class XiaoaiCloudPlugin {
         return inflight;
     }
 
-    private async synthesizeOpenclawTtsToRelayUrl(
+    private async synthesizeTtsToRelayUrl(
         text: string,
         options?: { title?: string }
     ) {
         const reachableBases = await this.computeSpeakerReachableAudioRelayBaseUrls();
         if (reachableBases.length === 0) {
             throw new Error(
-                "当前没有可供音箱访问的音频入口。请配置 audioPublicBaseUrl，或让 OpenClaw 网关通过局域网地址可被音箱直接访问。"
+                "当前没有可供音箱访问的音频入口。请配置 audioPublicBaseUrl，或让 Hermes 网关通过局域网地址可被音箱直接访问。"
             );
         }
-        const generated = await this.getOrCreateOpenclawTtsAsset(text);
+        const generated = await this.getOrCreateTtsAsset(text);
         const relayUrl = await this.registerBufferedAudioRelaySource(generated.audioBuffer, {
             extension: generated.audioExtension,
             contentType: contentTypeForAudioExtension(generated.audioExtension),
@@ -15037,20 +15210,20 @@ class XiaoaiCloudPlugin {
         }
     ) {
         await this.playText(text);
-        this.lastOpenclawSpeech = {
+        this.lastSpeech = {
             text,
             timeMs: Date.now(),
         };
-        this.lastOpenclawSpeakTime = Date.now() / 1000;
-        this.armDialogWindow(this.lastOpenclawSpeakTime);
+        this.lastSpeakTime = Date.now() / 1000;
+        this.armDialogWindow(this.lastSpeakTime);
         this.recordVoiceContextTurn("assistant", text);
         this.recordConsoleEvent(
             options?.consoleEventKind || "tool.speak",
-            options?.consoleEventTitle || "OpenClaw 让小爱播报",
+            options?.consoleEventTitle || "Hermes 让小爱播报",
             text,
             "success"
         );
-        void this.sendOpenclawNotification(
+        void this.sendNotification(
             text,
             options?.notificationLabel || "播报回传",
             {
@@ -16227,17 +16400,17 @@ class XiaoaiCloudPlugin {
                     typeof inheritedLoopRestoreType === "number"
                         ? inheritedLoopRestoreType
                         : readNumber(beforePlayback?.loopType);
-                this.lastOpenclawSpeech = {
+                this.lastSpeech = {
                     text: detail,
                     timeMs: Date.now(),
                 };
                 if (options?.armDialogWindow) {
-                    this.lastOpenclawSpeakTime = Date.now() / 1000;
-                    this.armDialogWindow(this.lastOpenclawSpeakTime);
+                    this.lastSpeakTime = Date.now() / 1000;
+                    this.armDialogWindow(this.lastSpeakTime);
                 }
                 this.recordConsoleEvent(
                     options?.consoleEventKind || "tool.audio",
-                    options?.consoleEventTitle || "OpenClaw 让小爱播放音频",
+                    options?.consoleEventTitle || "Hermes 让小爱播放音频",
                     `${detail}，音箱已接收，正在缓冲中。`,
                     "info",
                     { audioUrl: pendingPlayback.startedWithUrl }
@@ -16442,17 +16615,17 @@ class XiaoaiCloudPlugin {
                 shouldArmLoopGuard && typeof deadlineAtMs !== "number"
                     ? Date.now() + EXTERNAL_AUDIO_PENDING_STARTUP_TIMEOUT_MS
                     : undefined;
-            this.lastOpenclawSpeech = {
+            this.lastSpeech = {
                 text: detail,
                 timeMs: Date.now(),
             };
             if (options?.armDialogWindow) {
-                this.lastOpenclawSpeakTime = Date.now() / 1000;
-                this.armDialogWindow(this.lastOpenclawSpeakTime);
+                this.lastSpeakTime = Date.now() / 1000;
+                this.armDialogWindow(this.lastSpeakTime);
             }
             this.recordConsoleEvent(
                 options?.consoleEventKind || "tool.audio",
-                options?.consoleEventTitle || "OpenClaw 让小爱播放音频",
+                options?.consoleEventTitle || "Hermes 让小爱播放音频",
                 detail,
                 "success",
                 { audioUrl: startedWithUrl }
@@ -17221,7 +17394,7 @@ class XiaoaiCloudPlugin {
         if (result.code === 0) {
             this.armDialogWindow();
             if (this.remoteWakeArmsDialogWindow()) {
-                this.lastOpenclawSpeakTime = Date.now() / 1000;
+                this.lastSpeakTime = Date.now() / 1000;
             }
             this.waitingForResponse = false;
             return true;
@@ -18151,7 +18324,7 @@ class XiaoaiCloudPlugin {
         return `${normalized.slice(0, maxChars - 3)}...`;
     }
 
-    private isOpenclawChannelUnavailableError(message: string) {
+    private isChannelUnavailableError(message: string) {
         const lower = message.toLowerCase();
         return (
             lower.includes("channel is unavailable") ||
@@ -18173,7 +18346,7 @@ class XiaoaiCloudPlugin {
 
     private markActiveVoiceAgentSpoken(
         text: string,
-        sessionKey = this.openclawVoiceSessionKey
+        sessionKey = this.voiceSessionKey
     ) {
         const activeRun =
             this.activeVoiceAgentRuns.find(
@@ -18196,11 +18369,11 @@ class XiaoaiCloudPlugin {
         });
     }
 
-    private normalizeOpenclawReplyPayloads(value: any): OpenclawReplyPayload[] {
+    private normalizeReplyPayloads(value: any): ReplyPayload[] {
         if (!Array.isArray(value)) {
             return [];
         }
-        const normalized: OpenclawReplyPayload[] = [];
+        const normalized: ReplyPayload[] = [];
         for (const item of value) {
             if (!item || typeof item !== "object") {
                 continue;
@@ -18224,9 +18397,9 @@ class XiaoaiCloudPlugin {
         return normalized;
     }
 
-    private async handleOpenclawFinalPayloads(
+    private async handleFinalPayloads(
         activeRun: ActiveVoiceAgentRun,
-        payloads: OpenclawReplyPayload[]
+        payloads: ReplyPayload[]
     ) {
         if (payloads.length === 0 || activeRun.firstSpeakObserved) {
             return;
@@ -18271,13 +18444,13 @@ class XiaoaiCloudPlugin {
                     interrupt: false,
                     armDialogWindow: true,
                     consoleEventKind: "tool.audio",
-                    consoleEventTitle: "OpenClaw 音频回复",
+                    consoleEventTitle: "Hermes 音频回复",
                 });
             } catch (error) {
                 playbackError = this.errorMessage(error);
                 this.recordConsoleEvent(
                     "tool.audio",
-                    "OpenClaw 音频回复改为浏览器兜底",
+                    "Hermes 音频回复改为浏览器兜底",
                     firstDetail,
                     "warn",
                     { audioUrl: first.url }
@@ -18296,7 +18469,7 @@ class XiaoaiCloudPlugin {
                     firstContextTitle,
                     activeRun.sessionKey
                 );
-                void this.sendOpenclawNotification(firstContextTitle, "音频回传", {
+                void this.sendNotification(firstContextTitle, "音频回传", {
                     bestEffort: true,
                 }).catch(() => undefined);
             }
@@ -18320,15 +18493,15 @@ class XiaoaiCloudPlugin {
             this.markActiveVoiceAgentSpoken(joined, activeRun.sessionKey);
             this.waitingForResponse = false;
             await this.playText(joined);
-            this.lastOpenclawSpeech = {
+            this.lastSpeech = {
                 text: joined,
                 timeMs: Date.now(),
             };
-            this.lastOpenclawSpeakTime = Date.now() / 1000;
-            this.armDialogWindow(this.lastOpenclawSpeakTime);
+            this.lastSpeakTime = Date.now() / 1000;
+            this.armDialogWindow(this.lastSpeakTime);
             this.recordVoiceContextTurn("assistant", joined, activeRun.sessionKey);
-            this.recordConsoleEvent("tool.reply", "OpenClaw 文字回复", joined, "success");
-            void this.sendOpenclawNotification(joined, "播报回传", {
+            this.recordConsoleEvent("tool.reply", "Hermes 文字回复", joined, "success");
+            void this.sendNotification(joined, "播报回传", {
                 bestEffort: true,
             }).catch(() => undefined);
         }
@@ -18377,7 +18550,7 @@ class XiaoaiCloudPlugin {
         return result;
     }
 
-    private resolveOpenclawGatewayWsUrl(globalConfig?: Record<string, any>) {
+    private resolveGatewayWsUrl(globalConfig?: Record<string, any>) {
         const runtimeUrl =
             normalizeWebsocketUrl(readString(this.api?.runtime?.gateway?.url)) ||
             normalizeWebsocketUrl(readString(this.api?.gateway?.url));
@@ -18406,7 +18579,7 @@ class XiaoaiCloudPlugin {
         return `ws://127.0.0.1:${port}`;
     }
 
-    private isOpenclawGatewayReconnectableError(message: string) {
+    private isGatewayReconnectableError(message: string) {
         const lower = message.toLowerCase();
         return (
             lower.includes("gateway not connected") ||
@@ -18418,12 +18591,12 @@ class XiaoaiCloudPlugin {
     }
 
     // Gateway client methods removed — voice forwarding now uses direct LLM API
-    private async stopOpenclawGatewayClient() { /* removed */ }
-    private async ensureOpenclawGatewayClient(_config: PluginConfig): Promise<never> {
-        throw new Error("OpenClaw Gateway client removed. Use direct LLM API instead.");
+    private async stopGatewayClient() { /* removed */ }
+    private async ensureGatewayClient(_config: PluginConfig): Promise<never> {
+        throw new Error("Hermes Gateway client removed. Use direct LLM API instead.");
     }
-    private async runOpenclawGatewayCall<T>(_config: PluginConfig, _method: string, _params: Record<string, any>, _label: string, _options?: any): Promise<T> {
-        throw new Error("OpenClaw Gateway call removed. Use direct LLM API instead.");
+    private async runGatewayCall<T>(_config: PluginConfig, _method: string, _params: Record<string, any>, _label: string, _options?: any): Promise<T> {
+        throw new Error("Hermes Gateway call removed. Use direct LLM API instead.");
     }
 
     private async sendNotification(
@@ -18432,6 +18605,39 @@ class XiaoaiCloudPlugin {
         options?: { bestEffort?: boolean }
     ) {
         const config = await this.loadConfig(false);
+
+        // Try Telegram Bot API first if channel is telegram
+        const channel = readString(config.notificationChannel)?.toLowerCase() || "telegram";
+        const target = readString(config.notificationTarget);
+
+        if (channel === "telegram" && target) {
+            const botToken = process.env.TELEGRAM_BOT_TOKEN;
+            if (botToken) {
+                try {
+                    const message = label ? `[${label}] ${text}` : text;
+                    const response = await fetch(
+                        `https://api.telegram.org/bot${botToken}/sendMessage`,
+                        {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                chat_id: target,
+                                text: message,
+                                parse_mode: "Markdown",
+                            }),
+                        }
+                    );
+                    if (response.ok) {
+                        console.log(`[XiaoAI Cloud] Notification sent to Telegram (${target}): ${text}`);
+                        return true;
+                    }
+                } catch (e) {
+                    console.warn(`[XiaoAI Cloud] Telegram notification failed: ${e}`);
+                }
+            }
+        }
+
+        // Fallback to webhook
         const webhookUrl = config.notificationWebhookUrl;
 
         if (!webhookUrl) {
@@ -18479,17 +18685,14 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    // Backward-compat alias
-    private async sendOpenclawNotification(text: string, label?: string, options?: { bestEffort?: boolean }) {
-        return this.sendNotification(text, label, options);
-    }
+
 
     private async waitForVoiceAgentRun(
         config: PluginConfig,
         activeRun: ActiveVoiceAgentRun
     ) {
         try {
-            const result = await this.runOpenclawGatewayCall<{
+            const result = await this.runGatewayCall<{
                 status?: string;
                 startedAt?: number;
                 endedAt?: number;
@@ -18499,11 +18702,11 @@ class XiaoaiCloudPlugin {
                 "agent.wait",
                 {
                     runId: activeRun.id,
-                    timeoutMs: OPENCLAW_AGENT_WAIT_TIMEOUT_MS,
+                    timeoutMs: AGENT_WAIT_TIMEOUT_MS,
                 },
                 `${activeRun.label}/等待结束`,
                 {
-                    timeoutMs: OPENCLAW_AGENT_WAIT_TIMEOUT_MS + 10_000,
+                    timeoutMs: AGENT_WAIT_TIMEOUT_MS + 10_000,
                 }
             );
             const status = readString(result?.status) || "ok";
@@ -18525,14 +18728,14 @@ class XiaoaiCloudPlugin {
                     `-> [${activeRun.label}] Run 异常结束 | 会话: ${activeRun.sessionKey || "default"} | ${this.errorMessage(result?.error)}`
                 );
             }
-            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.openclawVoiceSessionKey) {
+            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.voiceSessionKey) {
                 this.waitingForResponse = false;
             }
         } catch (error) {
             console.warn(
                 `-> [${activeRun.label}] Run 收尾失败: ${this.errorMessage(error)}`
             );
-            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.openclawVoiceSessionKey) {
+            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.voiceSessionKey) {
                 this.waitingForResponse = false;
             }
         } finally {
@@ -18540,9 +18743,9 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private buildOpenclawResponsesInput(text: string, config: PluginConfig) {
+    private buildResponsesInput(text: string, config: PluginConfig) {
         const trimmed = text.trim();
-        if (!config.openclawThinkingOff) {
+        if (!config.thinkingOff) {
             return trimmed;
         }
         if (/^\/(?:t|think|thinking)\b/i.test(trimmed)) {
@@ -18551,7 +18754,7 @@ class XiaoaiCloudPlugin {
         return trimmed ? `/thinking off\n${trimmed}` : "/thinking off";
     }
 
-    private extractOpenclawResponsesOutputText(value: any): string | undefined {
+    private extractResponsesOutputText(value: any): string | undefined {
         const direct = readString(value?.output_text);
         if (direct) {
             return direct;
@@ -18591,17 +18794,17 @@ class XiaoaiCloudPlugin {
         return joined || undefined;
     }
 
-    private normalizeOpenclawResponsesReplyPayloads(value: any): OpenclawReplyPayload[] {
-        const text = this.extractOpenclawResponsesOutputText(value);
+    private normalizeResponsesReplyPayloads(value: any): ReplyPayload[] {
+        const text = this.extractResponsesOutputText(value);
         return text ? [{ text }] : [];
     }
 
-    private async computeOpenclawGatewayHttpBaseUrls(
+    private async computeGatewayHttpBaseUrls(
         globalConfig?: Record<string, any>
     ) {
         const urls = await discoverGatewayBaseUrls(this.api);
         const fallback = websocketUrlToHttp(
-            this.resolveOpenclawGatewayWsUrl(globalConfig)
+            this.resolveGatewayWsUrl(globalConfig)
         );
         return uniqueStrings([
             ...urls,
@@ -18615,22 +18818,22 @@ class XiaoaiCloudPlugin {
         label: string,
         activeRun: ActiveVoiceAgentRun
     ) {
-        const authState = await this.readOpenclawGatewayAuthState();
-        if (!this.readOpenclawResponsesEndpointEnabled(authState.globalConfig)) {
+        const authState = await this.readGatewayAuthState();
+        if (!this.readResponsesEndpointEnabled(authState.globalConfig)) {
             throw new Error(
-                "OpenClaw Responses HTTP 端点尚未启用，请先打开“强制走非流式请求”并等待网关重启完成。"
+                "Hermes Responses HTTP 端点尚未启用，请先打开“强制走非流式请求”并等待网关重启完成。"
             );
         }
 
-        const baseUrls = await this.computeOpenclawGatewayHttpBaseUrls(authState.globalConfig);
+        const baseUrls = await this.computeGatewayHttpBaseUrls(authState.globalConfig);
         if (baseUrls.length === 0) {
-            throw new Error("没有找到可用的 OpenClaw Gateway HTTP 地址，无法走官方非流式接口。");
+            throw new Error("没有找到可用的 Hermes Gateway HTTP 地址，无法走官方非流式接口。");
         }
 
-        const agentId = readString(config.openclawAgent) || "main";
+        const agentId = readString(config.hermesAgent) || "main";
         const requestBody = {
-            model: agentId.startsWith("openclaw:") ? agentId : `openclaw:${agentId}`,
-            input: this.buildOpenclawResponsesInput(text, config),
+            model: agentId.startsWith("hermes:") ? agentId : `hermes:${agentId}`,
+            input: this.buildResponsesInput(text, config),
             stream: false,
             ...(activeRun.sessionKey ? { user: activeRun.sessionKey } : {}),
         };
@@ -18641,16 +18844,16 @@ class XiaoaiCloudPlugin {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => {
                 controller.abort();
-            }, OPENCLAW_AGENT_WAIT_TIMEOUT_MS + 10_000);
+            }, AGENT_WAIT_TIMEOUT_MS + 10_000);
             try {
                 const response = await fetch(endpointUrl, {
                     method: "POST",
                     headers: {
                         "Authorization": `Bearer ${authState.bearerSecret}`,
                         "Content-Type": "application/json",
-                        "x-openclaw-agent-id": agentId,
+                        "x-hermes-agent-id": agentId,
                         ...(activeRun.sessionKey
-                            ? { "x-openclaw-session-key": activeRun.sessionKey }
+                            ? { "x-hermes-session-key": activeRun.sessionKey }
                             : {}),
                     },
                     body: JSON.stringify(requestBody),
@@ -18674,7 +18877,7 @@ class XiaoaiCloudPlugin {
                         ) || `HTTP ${response.status}`;
                     if (response.status === 404) {
                         throw new Error(
-                            "OpenClaw Responses HTTP 端点未启用，请等待网关重启完成后再试。"
+                            "Hermes Responses HTTP 端点未启用，请等待网关重启完成后再试。"
                         );
                     }
                     throw new Error(`HTTP ${response.status}: ${detail}`);
@@ -18683,10 +18886,10 @@ class XiaoaiCloudPlugin {
                 const result =
                     parsedBody ??
                     (rawBody
-                        ? readJsonObject<Record<string, any>>(rawBody, "OpenClaw 非流式接口")
+                        ? readJsonObject<Record<string, any>>(rawBody, "Hermes 非流式接口")
                         : {});
-                console.log(`-> [${label}] 已走 OpenClaw 官方非流式 /v1/responses`);
-                return this.normalizeOpenclawResponsesReplyPayloads(result);
+                console.log(`-> [${label}] 已走 Hermes 官方非流式 /v1/responses`);
+                return this.normalizeResponsesReplyPayloads(result);
             } catch (error) {
                 lastError = new Error(
                     `${endpointUrl} 调用失败: ${this.errorMessage(error)}`
@@ -18696,7 +18899,7 @@ class XiaoaiCloudPlugin {
             }
         }
 
-        throw lastError || new Error("OpenClaw 官方非流式接口调用失败。");
+        throw lastError || new Error("Hermes 官方非流式接口调用失败。");
     }
 
     private async deliverAgentPromptViaHermesApi(
@@ -18704,13 +18907,13 @@ class XiaoaiCloudPlugin {
         text: string,
         label: string,
         activeRun: ActiveVoiceAgentRun
-    ): Promise<OpenclawReplyPayload[]> {
+    ): Promise<ReplyPayload[]> {
         const hermesApiUrl = config.hermesApiUrl || process.env.HERMES_API_URL || "http://127.0.0.1:8642";
 
         const messages = [
             {
                 role: "system",
-                content: config.openclawVoiceSystemPrompt ||
+                content: config.voiceSystemPrompt ||
                     "你是一个有用的语音助手。请用简洁的中文回答。回复要简短自然，适合语音播报。"
             },
             ...this.voiceContextTurns.slice(-config.voiceContextMaxTurns * 2).map(turn => ({
@@ -18724,7 +18927,7 @@ class XiaoaiCloudPlugin {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                model: "hermes-agent",
+                model: "xiaoai",
                 messages,
                 stream: false,
             }),
@@ -18751,7 +18954,7 @@ class XiaoaiCloudPlugin {
         text: string,
         label: string,
         activeRun: ActiveVoiceAgentRun
-    ): Promise<OpenclawReplyPayload[]> {
+    ): Promise<ReplyPayload[]> {
         const apiUrl = config.llmApiUrl || process.env.LLM_API_URL;
         const apiKey = config.llmApiKey || process.env.LLM_API_KEY;
         const model = config.llmModel || process.env.LLM_MODEL || "gpt-4o-mini";
@@ -18760,7 +18963,7 @@ class XiaoaiCloudPlugin {
             throw new Error("LLM API URL not configured. Set llmApiUrl in config or LLM_API_URL env.");
         }
 
-        const systemPrompt = config.openclawVoiceSystemPrompt ||
+        const systemPrompt = config.voiceSystemPrompt ||
             "You are a helpful voice assistant. Respond concisely in Chinese. Keep replies short and natural for text-to-speech.";
 
         const messages = [
@@ -18835,15 +19038,24 @@ class XiaoaiCloudPlugin {
         this.pendingAgentPromptCount = this.activeVoiceAgentRuns.length;
 
         try {
-            // Try Hermes API first, fallback to direct LLM
-            let payloads: OpenclawReplyPayload[];
+            // Try Responses API first (supports per-agent model), fallback to chat completions
+            let payloads: ReplyPayload[];
             try {
-                payloads = await this.deliverAgentPromptViaHermesApi(
-                    config,
-                    text,
-                    label,
-                    activeRun
-                );
+                if (config.forceNonStreaming) {
+                    payloads = await this.deliverAgentPromptViaResponsesApi(
+                        config,
+                        text,
+                        label,
+                        activeRun
+                    );
+                } else {
+                    payloads = await this.deliverAgentPromptViaHermesApi(
+                        config,
+                        text,
+                        label,
+                        activeRun
+                    );
+                }
             } catch (hermesError) {
                 console.warn(`-> [${label}] Hermes API failed, falling back to direct LLM: ${this.errorMessage(hermesError)}`);
                 payloads = await this.deliverAgentPromptViaLlmApi(
@@ -18859,12 +19071,12 @@ class XiaoaiCloudPlugin {
                 `-> [${label}] LLM call completed | ${elapsedMs}ms | session: ${activeRun.sessionKey || "default"}`
             );
 
-            await this.handleOpenclawFinalPayloads(activeRun, payloads);
-            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.openclawVoiceSessionKey) {
+            await this.handleFinalPayloads(activeRun, payloads);
+            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.voiceSessionKey) {
                 this.waitingForResponse = false;
             }
         } catch (error) {
-            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.openclawVoiceSessionKey) {
+            if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.voiceSessionKey) {
                 this.waitingForResponse = false;
             }
             throw error;
@@ -18874,7 +19086,7 @@ class XiaoaiCloudPlugin {
     }
 
     private forwardToLlm(text: string, options?: { renewVoiceSession?: boolean }) {
-        const sessionKey = this.resolveOpenclawVoiceSessionKey(Boolean(options?.renewVoiceSession));
+        const sessionKey = this.resolveVoiceSessionKey(Boolean(options?.renewVoiceSession));
         const sessionNotice = this.buildVoiceSessionNotice(options);
         const contextPrompt = this.buildVoiceContextPrompt(sessionKey);
         const prompt = [sessionNotice, contextPrompt, text].filter(Boolean).join("\n\n");
@@ -18885,7 +19097,7 @@ class XiaoaiCloudPlugin {
             sessionKey,
         }).catch((error) => {
             this.waitingForResponse = false;
-            console.error(`[OpenClaw异常] CLI 执行失败: ${this.errorMessage(error)}`);
+            console.error(`[Hermes异常] CLI 执行失败: ${this.errorMessage(error)}`);
         });
     }
 
@@ -18959,7 +19171,7 @@ class XiaoaiCloudPlugin {
                 reason: lateRecordForwarding.skip
                     ? lateRecordForwarding.reason
                     : interceptHint?.answersPresent
-                        ? "检测到会话记录已带答案，立即强拦截并准备转发 OpenClaw"
+                        ? "检测到会话记录已带答案，立即强拦截并准备转发 Hermes"
                     : guardPlan.primarySilenceDelayMs > 0
                         ? `按预计原生起播窗口延后 ${guardPlan.primarySilenceDelayMs}ms 拦截`
                         : guardPlan.aggressive
@@ -19103,7 +19315,7 @@ class XiaoaiCloudPlugin {
 
     private registerTool(tool: { name: string; description: string; parameters: any; execute: (id: string, params: any) => Promise<any> }) {
         this.registeredTools.set(tool.name, tool);
-        // Also register via OpenClaw API if available
+        // Also register via Hermes API if available
         if (typeof this.api?.registerTool === "function") {
             this.api.registerTool(tool);
         }
@@ -19153,7 +19365,7 @@ class XiaoaiCloudPlugin {
                             interrupt: false,
                             armDialogWindow: true,
                             consoleEventKind: "tool.audio",
-                            consoleEventTitle: "OpenClaw 播报指令自动改为音频播放",
+                            consoleEventTitle: "Hermes 播报指令自动改为音频播放",
                         });
                         return {
                             content: [{
@@ -19168,7 +19380,7 @@ class XiaoaiCloudPlugin {
                         const reason = this.errorMessage(error);
                         this.recordConsoleEvent(
                             "tool.audio",
-                            "OpenClaw 播报指令自动改音频失败，已回退文本播报",
+                            "Hermes 播报指令自动改音频失败，已回退文本播报",
                             reason,
                             "warn",
                             { audioUrl: redirectedAudio.input }
@@ -19187,7 +19399,7 @@ class XiaoaiCloudPlugin {
 
                 await this.finalizeSpokenToolReply(text, {
                     consoleEventKind: "tool.speak",
-                    consoleEventTitle: "OpenClaw 让小爱播报",
+                    consoleEventTitle: "Hermes 让小爱播报",
                     notificationLabel: "播报回传",
                 });
                 return { content: [{ type: "text", text: `[SYSTEM]播报完成: ${text}` }] };
@@ -19232,7 +19444,7 @@ class XiaoaiCloudPlugin {
                     interrupt: false,
                     armDialogWindow: true,
                     consoleEventKind: "tool.audio",
-                    consoleEventTitle: "OpenClaw 让小爱播放音频",
+                    consoleEventTitle: "Hermes 让小爱播放音频",
                 });
                 return {
                     content: [{
@@ -19249,7 +19461,7 @@ class XiaoaiCloudPlugin {
         this.registerTool({
             name: "xiaoai_tts_bridge",
             description:
-                "使用 OpenClaw 官方 runtime.tts 把文本先合成为音频，再通过小爱音箱播放。适合想走统一 TTS 音频链路，而不是直接文本播报的场景。",
+                "使用 Hermes 官方 runtime.tts 把文本先合成为音频，再通过小爱音箱播放。适合想走统一 TTS 音频链路，而不是直接文本播报的场景。",
             parameters: {
                 type: "object",
                 additionalProperties: false,
@@ -19278,7 +19490,7 @@ class XiaoaiCloudPlugin {
                 this.markActiveVoiceAgentSpoken(text);
                 this.waitingForResponse = false;
                 try {
-                    const playbackUrl = await this.synthesizeOpenclawTtsToRelayUrl(text, {
+                    const playbackUrl = await this.synthesizeTtsToRelayUrl(text, {
                         title: params.title || text,
                     });
                     const played = await this.playAudioUrl(playbackUrl, {
@@ -19286,7 +19498,7 @@ class XiaoaiCloudPlugin {
                         interrupt: false,
                         armDialogWindow: true,
                         consoleEventKind: "tool.tts-audio",
-                        consoleEventTitle: "OpenClaw TTS 桥接播放",
+                        consoleEventTitle: "Hermes TTS 桥接播放",
                     });
                     return {
                         content: [{
@@ -19306,13 +19518,13 @@ class XiaoaiCloudPlugin {
                     });
                     this.recordConsoleEvent(
                         "tool.tts-audio",
-                        "OpenClaw TTS 桥接改为文本播报",
+                        "Hermes TTS 桥接改为文本播报",
                         reason,
                         "warn"
                     );
                     await this.finalizeSpokenToolReply(text, {
                         consoleEventKind: "tool.speak",
-                        consoleEventTitle: "OpenClaw TTS 桥接改为文本播报",
+                        consoleEventTitle: "Hermes TTS 桥接改为文本播报",
                         notificationLabel: "播报回传",
                     });
                     return {
@@ -19432,11 +19644,11 @@ class XiaoaiCloudPlugin {
         this.registerTool({
             name: "xiaoai_new_session",
             description:
-                "重置小爱语音入口的上下文，并让下一次通过小爱进入的 OpenClaw 对话切换到新的会话。",
+                "重置小爱语音入口的上下文，并让下一次通过小爱进入的 Hermes 对话切换到新的会话。",
             parameters: schemaObject({}),
             execute: async () => {
-                const previousSessionKey = this.openclawVoiceSessionKey;
-                const nextSessionKey = this.resolveOpenclawVoiceSessionKey(true);
+                const previousSessionKey = this.voiceSessionKey;
+                const nextSessionKey = this.resolveVoiceSessionKey(true);
                 console.log(
                     `<- [新会话/云端] ${previousSessionKey || "未建立"} -> ${nextSessionKey}`
                 );
@@ -19452,7 +19664,7 @@ class XiaoaiCloudPlugin {
                     content: [{
                         type: "text",
                         text:
-                            "[SYSTEM]已为小爱语音入口开启新的 OpenClaw 会话。后续通过小爱说话时，会从新的上下文开始。",
+                            "[SYSTEM]已为小爱语音入口开启新的 Hermes 会话。后续通过小爱说话时，会从新的上下文开始。",
                     }],
                 };
             },
@@ -19598,8 +19810,8 @@ class XiaoaiCloudPlugin {
                     return undefined;
                 });
                 const config = await this.loadConfig(false).catch(() => this.config);
-                const openclawAgentState = config
-                    ? await this.queryOpenclawAgentModelState(config).catch(() => undefined)
+                const hermesAgentState = config
+                    ? await this.queryAgentModelState(config).catch(() => undefined)
                     : undefined;
                 const session = this.getLoginSessionSnapshot();
                 const helperStatus = await this.getMicoapiHelperStatus(config);
@@ -19613,8 +19825,8 @@ class XiaoaiCloudPlugin {
                     ? `${this.device.name} (${this.device.hardware}/${this.device.model})`
                     : "未初始化";
                 const elapsed =
-                    this.lastOpenclawSpeakTime > 0
-                        ? `${((Date.now() / 1000) - this.lastOpenclawSpeakTime).toFixed(0)}秒前`
+                    this.lastSpeakTime > 0
+                        ? `${((Date.now() / 1000) - this.lastSpeakTime).toFixed(0)}秒前`
                         : "从未播报";
                 const lastConversation =
                     this.lastConversationTimestamp > 0
@@ -19637,17 +19849,17 @@ class XiaoaiCloudPlugin {
                             `初始化状态: ${loginState}\n` +
                             `账号: ${maskAccountLabel(config?.account) || "未保存"}\n` +
                             `云端区域: ${config?.serverCountry || "?"}\n` +
-                            `OpenClaw 路由: ${(openclawAgentState?.agentId || config?.openclawAgent || "main")} -> ${config?.openclawChannel || "?"}/${config?.openclawNotificationsDisabled ? "已关闭通知" : config?.openclawTo || "未配置"}\n` +
-                            `打开思考: ${config?.openclawThinkingOff ? "关闭" : "打开"}\n` +
-                            `强制非流式: ${config?.openclawForceNonStreaming ? "开启" : "关闭"}\n` +
-                            `xiaoai agent 上下文窗口: ${openclawAgentState?.contextTokens || "跟随 OpenClaw 默认"} tokens\n` +
+                            `Hermes 路由: ${(hermesAgentState?.agentId || config?.hermesAgent || "main")} -> ${config?.notificationChannel || "?"}/${config?.notificationsDisabled ? "已关闭通知" : config?.notificationTarget || "未配置"}\n` +
+                            `打开思考: ${config?.thinkingOff ? "关闭" : "打开"}\n` +
+                            `强制非流式: ${config?.forceNonStreaming ? "开启" : "关闭"}\n` +
+                            `xiaoai agent 上下文窗口: ${hermesAgentState?.contextTokens || "跟随 Hermes 默认"} tokens\n` +
                             `micoapi 辅助: ${this.formatMicoapiHelperStatus(helperStatus)}\n` +
                             `调试日志: ${(config?.debugLogEnabled ?? DEFAULT_DEBUG_LOG_ENABLED) ? "开启" : "关闭"} (${config?.debugLogPath || "?"})\n` +
                             `唤醒词规则: ${this.wakeWordPatternSource || config?.wakeWordPattern || DEFAULT_WAKE_WORD_PATTERN}\n` +
                             `对话窗口: ${this.continuousDialogWindow}秒\n` +
                             `轮询间隔: ${config?.pollIntervalMs ?? "?"}ms\n` +
                             `目标设备: ${deviceLabel}\n` +
-                            `语音会话: ${this.openclawVoiceSessionKey || "未建立（首次对话时自动创建）"}\n` +
+                            `语音会话: ${this.voiceSessionKey || "未建立（首次对话时自动创建）"}\n` +
                             `上次播报: ${elapsed}\n` +
                             `最近识别记录: ${lastConversation}\n` +
                             `等待回答: ${this.waitingForResponse ? "是" : "否"}\n` +
@@ -19665,7 +19877,7 @@ class XiaoaiCloudPlugin {
 
         this.registerTool({
             name: "xiaoai_login_begin",
-            description: "生成新的小米登录入口，并通过 OpenClaw 再次发给用户。",
+            description: "生成新的小米登录入口，并通过 Hermes 再次发给用户。",
             parameters: schemaObject({}),
             execute: async () => {
                 const session = await this.ensureLoginSession(true);
@@ -19728,7 +19940,7 @@ class XiaoaiCloudPlugin {
             execute: async () => {
                 const consoleUrl = await this.getConsoleEntryUrl();
                 try {
-                    await this.sendOpenclawNotification(
+                    await this.sendNotification(
                         [
                             "这是小爱直连插件的后台控制台入口。",
                             `控制台地址：${consoleUrl}`,
@@ -19843,7 +20055,7 @@ class XiaoaiCloudPlugin {
         this.registerTool({
             name: "xiaoai_update_settings",
             description:
-                "批量修改小爱插件的高级设置。适合调整通知渠道、OpenClaw 模型、xiaoai agent 上下文窗口、thinking、非流式、workspace 提示文件、过渡播报词和调试日志等控制台配置。",
+                "批量修改小爱插件的高级设置。适合调整通知渠道、Hermes 模型、xiaoai agent 上下文窗口、thinking、非流式、workspace 提示文件、过渡播报词和调试日志等控制台配置。",
             parameters: schemaObject(
                 {
                     channel: schemaString({
@@ -19856,7 +20068,7 @@ class XiaoaiCloudPlugin {
                         description: "是否关闭插件通知渠道。true 为关闭；关闭后不影响小爱对话转发。",
                     }),
                     model: schemaString({
-                        description: "xiaoai 专属 agent 要切换到的 OpenClaw 模型，例如 openai/gpt-5.4。",
+                        description: "xiaoai 专属 agent 要切换到的 Hermes 模型，例如 openai/gpt-5.4。",
                     }),
                     audioTailPaddingMs: schemaNumber({
                         description:
@@ -19933,7 +20145,7 @@ class XiaoaiCloudPlugin {
                     ) || typeof params.disableWorkspaceFile === "boolean";
                 const workspaceFileRef = readString(params.workspaceFile);
                 const workspaceFileDefinition = workspaceFileRef
-                    ? findOpenclawWorkspaceFileDefinition(workspaceFileRef)
+                    ? findWorkspaceFileDefinition(workspaceFileRef)
                     : undefined;
 
                 const hasRouteUpdate =
@@ -19941,7 +20153,7 @@ class XiaoaiCloudPlugin {
                     typeof params.channel === "string" ||
                     typeof params.target === "string";
                 if (hasRouteUpdate) {
-                    const result = await this.updateOpenclawNotificationRoute({
+                    const result = await this.updateNotificationRoute({
                         channel: params.channel,
                         target: params.target,
                         disableNotification: params.disableNotification,
@@ -19973,14 +20185,14 @@ class XiaoaiCloudPlugin {
                 }
 
                 if (typeof params.thinkingEnabled === "boolean") {
-                    const result = await this.updateOpenclawThinkingOff(
+                    const result = await this.updateThinkingOff(
                         !params.thinkingEnabled
                     );
                     summary.push(result.enabled ? "thinking 已关闭" : "thinking 已打开");
                 }
 
                 if (typeof params.forceNonStreamingEnabled === "boolean") {
-                    const result = await this.updateOpenclawForceNonStreaming(
+                    const result = await this.updateForceNonStreaming(
                         params.forceNonStreamingEnabled
                     );
                     gatewayRestarting = gatewayRestarting || result.restarting;
@@ -19991,7 +20203,7 @@ class XiaoaiCloudPlugin {
 
                 const model = readString(params.model);
                 if (model) {
-                    const result = await this.updateOpenclawAgentModel(model);
+                    const result = await this.updateAgentModel(model);
                     gatewayRestarting = gatewayRestarting || result.restarting;
                     summary.push(`模型已切到 ${result.model}`);
                 }
@@ -20006,7 +20218,7 @@ class XiaoaiCloudPlugin {
                 }
 
                 if (typeof params.contextTokens === "number") {
-                    const result = await this.updateOpenclawAgentContextTokens(
+                    const result = await this.updateAgentContextTokens(
                         params.contextTokens
                     );
                     gatewayRestarting = gatewayRestarting || result.restarting;
@@ -20019,13 +20231,13 @@ class XiaoaiCloudPlugin {
                     Object.prototype.hasOwnProperty.call(params, "voiceSystemPrompt") &&
                     !(hasWorkspaceFileUpdate && workspaceFileDefinition?.id === "agents")
                 ) {
-                    const result = await this.updateOpenclawVoiceSystemPrompt(
+                    const result = await this.updateVoiceSystemPrompt(
                         params.voiceSystemPrompt
                     );
                     summary.push(
                         result.customized
-                            ? `已更新 ${OPENCLAW_AGENT_PROMPT_FILENAME}`
-                            : `已恢复默认 ${OPENCLAW_AGENT_PROMPT_FILENAME}`
+                            ? `已更新 ${AGENT_PROMPT_FILENAME}`
+                            : `已恢复默认 ${AGENT_PROMPT_FILENAME}`
                     );
                 }
 
@@ -20035,7 +20247,7 @@ class XiaoaiCloudPlugin {
                             "修改 workspace 文件时必须同时提供 workspaceFile。"
                         );
                     }
-                    const result = await this.updateOpenclawWorkspaceFile(
+                    const result = await this.updateWorkspaceFile(
                         workspaceFileRef,
                         {
                             content: params.workspaceFileContent,
@@ -20094,7 +20306,7 @@ class XiaoaiCloudPlugin {
                             "[SYSTEM]已更新以下设置：\n" +
                             detail +
                             (gatewayRestarting
-                                ? "\nOpenClaw 网关正在自动重启，稍后会恢复。"
+                                ? "\nHermes 网关正在自动重启，稍后会恢复。"
                                 : ""),
                     }],
                 };

@@ -325,7 +325,7 @@ ${renderSharedHead("XiaoAI Cloud Login Expired", assetBasePath)}
         <p class="hero-sub">这个临时链接已经过期或已被回收。为了避免公网长期暴露，登录会话会自动失效。</p>
         <div class="meta-pile">
           <div class="meta-pill">临时入口默认自动回收</div>
-          <div class="meta-pill">建议重新从 OpenClaw 获取</div>
+          <div class="meta-pill">建议重新从 Hermes 获取</div>
         </div>
         <div class="access-note-grid">
           <div class="detail-card access-detail-card">
@@ -334,12 +334,12 @@ ${renderSharedHead("XiaoAI Cloud Login Expired", assetBasePath)}
           </div>
           <div class="detail-card access-detail-card">
             <strong>怎么继续</strong>
-            <span>回到 OpenClaw，让助手重新触发一次 <code>xiaoai_login_begin</code>，新的入口会重新发到你的私聊里。</span>
+            <span>回到 Hermes，让助手重新触发一次 <code>xiaoai_login_begin</code>，新的入口会重新发到你的私聊里。</span>
           </div>
         </div>
         <div class="notice-card">
           <strong>下一步</strong>
-          <p>回到 OpenClaw 对话里重新触发一次登录入口。可以让助手调用 <code>xiaoai_login_begin</code>，或者直接说“重新发一下小爱登录链接”。</p>
+          <p>回到 Hermes 对话里重新触发一次登录入口。可以让助手调用 <code>xiaoai_login_begin</code>，或者直接说“重新发一下小爱登录链接”。</p>
         </div>
       </section>
     </main>
@@ -352,7 +352,7 @@ ${renderSharedHead("XiaoAI Cloud Login Expired", assetBasePath)}
 function sendExpiredJson(response: ServerResponse) {
     sendJson(response, 410, {
         error:
-            "登录会话已过期，请回到 OpenClaw 对话里重新触发 xiaoai_login_begin 获取新的链接。",
+            "登录会话已过期，请回到 Hermes 对话里重新触发 xiaoai_login_begin 获取新的链接。",
     });
 }
 
@@ -794,26 +794,21 @@ ${renderSharedHead("XiaoAI Cloud Login", assetBasePath)}
       if (!verification || !verification.verifyUrl || openVerifyPageInFlight || loginInFlight || verifyInFlight || sessionCompleted) {
         return;
       }
-      const openedWindow = window.open("about:blank", "_blank", "noopener");
-      if (!openedWindow) {
-        setStatus("err", "浏览器拦截了验证页面，请允许弹窗后重试。");
-        return;
-      }
       openVerifyPageInFlight = true;
       updateActionButtons();
-      setStatus("", "正在打开官方验证页面，请稍候…");
+      setStatus("", "正在准备官方验证页面，请稍候…");
       try {
         const data = await postJson(openVerifyPageApiUrl, {});
         const openUrl = String(data && (data.openUrl || (data.verification && data.verification.verifyUrl) || "") || "").trim();
         if (!openUrl) {
           throw new Error("当前没有可用的官方验证页面。");
         }
-        openedWindow.location.replace(openUrl);
+        const openedWindow = window.open(openUrl, "_blank");
+        if (!openedWindow) {
+          throw new Error("浏览器拦截了验证页面弹窗，请允许弹窗后重试。");
+        }
         setStatus("", "请在官方页面获取验证码，回到这里填写后再点登录。");
       } catch (error) {
-        try {
-          openedWindow.close();
-        } catch (_) {}
         setStatus("err", error.message || String(error));
       } finally {
         openVerifyPageInFlight = false;
@@ -1169,8 +1164,9 @@ export class LoginPortal {
             (preferred.length === 0 && direct.length === 0 && loopback.length === 0)
         ) {
             const hosts = getCandidateHosts(this.options.listenHost);
+            const selfBaseSuffix = routeBasePath && routeBasePath !== "/" ? routeBasePath : "";
             for (const host of hosts) {
-                addCandidate(`http://${host}:${this.options.port}`);
+                addCandidate(`http://${host}:${this.options.port}${selfBaseSuffix}`);
             }
         }
 
