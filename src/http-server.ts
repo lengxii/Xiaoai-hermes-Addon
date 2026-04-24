@@ -88,10 +88,12 @@ export function createHttpServer(plugin: PluginLike): http.Server {
                     const config = await plugin.loadConfig(false);
                     const routePath = config.authRoutePath || "/api/xiaoai-cloud";
                     const matchedPath = path.slice(routePath.length) || "/";
+                    console.log(`[DEBUG] path=${path}, routePath=${routePath}, matchedPath=${matchedPath}`);
                     const handled = await plugin.handleConsoleHttpRoute(config, req, res, url, matchedPath);
+                    console.log(`[DEBUG] handled=${handled}`);
                     if (handled) return;
                 } catch (error: any) {
-                    console.error("[XiaoAI Cloud] Console route error:", error.message);
+                    console.error("[XiaoAI Cloud] Console route error:", error.message, error.stack);
                 }
             }
         }
