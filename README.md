@@ -12,35 +12,68 @@
 
 ## 这是什么
 
-从 [Xiaoai-Claw-Addon](https://github.com/ZhengXieGang/Xiaoai-Claw-Addon)（OpenClaw 版本）适配而来的 **Hermes Agent** 插件。独立运行，不依赖 OpenClaw，通过 OpenAI 兼容的 LLM API 实现语音对话。
+从 [Xiaoai-Claw-Addon](https://github.com/ZhengXieGang/Xiaoai-Claw-Addon)（OpenClaw 版本）适配而来的 **Hermes Agent** 插件。
+
+**运行方式**：Hermes 插件 + Node.js 后端服务
+- Python 插件注册 Hermes 工具，调用 Node.js HTTP API
+- Node.js 服务处理小米 API、语音轮询、音箱控制
+- 语音转发优先走 Hermes API，fallback 到直接 LLM
 
 核心功能：
-- 语音拦截与转发（拦截小爱语音，转发给 LLM）
+- 语音拦截与转发（拦截小爱语音，转发给 Hermes 处理）
 - 小爱播报与远程唤醒
 - 小爱本地执行指令
 - 音量、唤醒词、工作模式、上下文记忆控制
 - 内嵌登录、设备切换、事件流和对话控制台
 - 音频回复处理
 
-## 与原版的区别
+## 架构
 
-| 项目 | OpenClaw 版 | Hermes 版 |
-|------|------------|-----------|
-| 运行方式 | OpenClaw 插件 | 独立 Node.js 服务 |
-| LLM 调用 | OpenClaw Gateway SDK | 直接调用 OpenAI 兼容 API |
-| 通知机制 | openclaw CLI | Webhook HTTP POST |
-| 数据目录 | `~/.openclaw/plugins/xiaoai-cloud/` | `~/.hermes/xiaoai-cloud/` |
-| 工具注册 | `this.api.registerTool()` | HTTP API 端点 |
-| 配置文件 | `openclaw.plugin.json` | `hermes.plugin.json` |
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Hermes Agent                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  xiaoai-cloud Python Plugin                        │  │
+│  │  - 注册 xiaoai_* 工具                              │  │
+│  │  - 调用 Node.js HTTP API                           │  │
+│  │  - 发送通知 (send_message)                         │  │
+│  └─────────────────────┬─────────────────────────────┘  │
+│                        │ HTTP                            │
+│  ┌─────────────────────▼─────────────────────────────┐  │
+│  │  Hermes API Server (port 8642)                     │  │
+│  │  - /v1/chat/completions                            │  │
+│  └───────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          │ 语音转发 (优先 Hermes API,
+                          │          fallback 直接 LLM)
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│              Node.js 后端服务 (port 17890)               │
+│  - 小米账号登录 / 设备发现                                │
+│  - 语音轮询 / 唤醒词检测                                  │
+│  - 音箱控制 (播报/音量/唤醒)                              │
+│  - Web 控制台                                            │
+│  - HTTP API (xiaoai_speak, xiaoai_play_audio, ...)      │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                   小米云端 API                            │
+│  - MiIO / MiNA 协议                                      │
+│  - 小爱音箱控制                                           │
+└─────────────────────────────────────────────────────────┘
+```
 
 ## 快速开始
 
 ### 环境要求
 - Node.js 22+
+- Python 3.10+
 - 小米账号 + 小爱音箱
-- OpenAI 兼容的 LLM API（如 OpenAI、DeepSeek、GLM 等）
+- Hermes Agent 已安装并运行
 
-### 安装
+### 1. 安装 Node.js 后端
 
 ```bash
 git clone https://github.com/lengxii/Xiaoai-hermes-Addon.git
@@ -49,38 +82,37 @@ npm install
 npm run build
 ```
 
-### 配置
-
-复制示例配置并编辑：
+### 2. 配置
 
 ```bash
 mkdir -p ~/.hermes/xiaoai-cloud
 cp config.example.json ~/.hermes/xiaoai-cloud/config.json
 ```
 
-编辑 `~/.hermes/xiaoai-cloud/config.json`，至少填写：
+编辑 `~/.hermes/xiaoai-cloud/config.json`：
 
 ```json
 {
+  "hermesApiUrl": "http://127.0.0.1:8642",
   "llmApiUrl": "https://api.openai.com",
   "llmApiKey": "sk-...",
   "llmModel": "gpt-4o-mini"
 }
 ```
 
-### 启动
+### 3. 安装 Hermes 插件
+
+```bash
+cp -r hermes-plugin ~/.hermes/plugins/xiaoai-cloud
+```
+
+### 4. 启动 Node.js 后端
 
 ```bash
 npm start
 ```
 
-或使用环境变量：
-
-```bash
-XIAOAI_PORT=17890 LLM_API_URL=https://api.openai.com LLM_API_KEY=sk-... npm start
-```
-
-### systemd 服务（可选）
+或使用 systemd：
 
 ```bash
 sudo cp xiaoai-cloud.service /etc/systemd/system/
@@ -88,9 +120,24 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now xiaoai-cloud
 ```
 
+### 5. 重启 Hermes
+
+```bash
+hermes gateway restart
+# 或在 CLI 中: /reset
+```
+
+## 语音转发流程
+
+1. 用户对小爱说话 → Node.js 服务轮询检测到
+2. Node.js 服务调用 **Hermes API** (`http://127.0.0.1:8642/v1/chat/completions`)
+3. Hermes Agent 处理请求（包括工具调用、记忆、上下文等）
+4. 返回结果 → Node.js 服务让小爱播报
+5. 如果 Hermes API 不可用，fallback 到直接调用 LLM API
+
 ## HTTP API
 
-服务启动后监听端口 17890（可配置），提供以下 API：
+Node.js 服务监听端口 17890，提供以下 API：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -100,21 +147,11 @@ sudo systemctl enable --now xiaoai-cloud
 | POST | `/api/xiaoai/play-audio` | 播放音频 URL |
 | POST | `/api/xiaoai/set-volume` | 设置音量 |
 | GET | `/api/xiaoai/get-volume` | 获取当前音量 |
-| POST | `/api/xiaoai/new-session` | 重置语音上下文 |
 | POST | `/api/xiaoai/wake-up` | 远程唤醒 |
 | POST | `/api/xiaoai/execute` | 发送指令到音箱 |
 | POST | `/api/xiaoai/set-mode` | 切换拦截模式 |
 | GET | `/api/xiaoai/status` | 获取完整状态 |
-| POST | `/api/xiaoai/login-begin` | 开始小米登录 |
-| GET | `/api/xiaoai/login-status` | 检查登录状态 |
 | GET | `/console` | Web 控制台 |
-
-## 首次使用
-
-1. 启动服务后打开控制台：http://localhost:17890/console
-2. 登录小米账号
-3. 选择要控制的音箱
-4. 开始使用
 
 ## 工作模式
 
@@ -126,12 +163,10 @@ sudo systemctl enable --now xiaoai-cloud
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `XIAOAI_PORT` | 17890 | HTTP 服务端口 |
-| `XIAOAI_HOST` | 0.0.0.0 | HTTP 服务绑定地址 |
-| `LLM_API_URL` | (必填) | OpenAI 兼容 API 地址 |
-| `LLM_API_KEY` | (可选) | API Key |
-| `LLM_MODEL` | gpt-4o-mini | 模型名称 |
-| `HERMES_HOME` | ~/.hermes | Hermes 主目录 |
+| `XIAOAI_PORT` | 17890 | Node.js 服务端口 |
+| `XIAOAI_HOST` | 0.0.0.0 | Node.js 服务绑定地址 |
+| `XIAOAI_API_URL` | http://127.0.0.1:17890 | Python 插件调用的 API 地址 |
+| `HERMES_API_URL` | http://127.0.0.1:8642 | Hermes API 地址 |
 
 ## 配置项
 
@@ -139,25 +174,23 @@ sudo systemctl enable --now xiaoai-cloud
 
 | 配置项 | 说明 |
 |--------|------|
-| `account` | 小米账号 |
-| `serverCountry` | 云端区域，默认 cn |
-| `speakerName` | 米家中的设备名称 |
-| `llmApiUrl` | LLM API 地址（必填） |
+| `hermesApiUrl` | Hermes API 地址（默认 http://127.0.0.1:8642） |
+| `llmApiUrl` | 直接 LLM API 地址（fallback） |
 | `llmApiKey` | LLM API Key |
 | `llmModel` | 模型名称 |
+| `account` | 小米账号 |
+| `speakerName` | 米家中的设备名称 |
 | `wakeWordPattern` | 唤醒词正则 |
-| `dialogWindowSeconds` | 免唤醒窗口时长 |
-| `notificationWebhookUrl` | 通知 webhook |
 
-## 排障
+## 与原版的区别
 
-**音箱找不到**：通过控制台登录并选择设备
-
-**语音没被拦截**：检查唤醒词模式和工作模式
-
-**LLM 没响应**：检查 `llmApiUrl` 和 `llmApiKey` 配置
-
-**端口冲突**：修改 `XIAOAI_PORT` 环境变量
+| 项目 | OpenClaw 版 | Hermes 版 |
+|------|------------|-----------|
+| 运行方式 | OpenClaw 插件 | Hermes 插件 + Node.js 服务 |
+| 语音转发 | OpenClaw Gateway SDK | Hermes API (优先) + 直接 LLM (fallback) |
+| 通知机制 | openclaw CLI | Hermes send_message |
+| 数据目录 | `~/.openclaw/` | `~/.hermes/xiaoai-cloud/` |
+| 工具注册 | OpenClaw API | Hermes 插件 API |
 
 ## 测试环境
 - 阿里云轻量应用服务器2C2G (Debian)

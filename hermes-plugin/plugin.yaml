@@ -1,0 +1,5 @@
+name: xiaoai-cloud
+version: "2.0"
+description: 控制小米小爱音箱 — 语音拦截、TTS 播放、音量控制、远程唤醒
+requires_env:
+  - XIAOAI_API_URL

@@ -87,6 +87,7 @@ interface PluginConfig {
     openclawForceNonStreaming: boolean;
     openclawVoiceSystemPrompt: string;
     notificationWebhookUrl?: string;
+    hermesApiUrl?: string;
     transitionPhrases: string[];
     debugLogEnabled: boolean;
     voiceContextMaxTurns: number;
@@ -18717,6 +18718,53 @@ class XiaoaiCloudPlugin {
         throw lastError || new Error("OpenClaw 官方非流式接口调用失败。");
     }
 
+    private async deliverAgentPromptViaHermesApi(
+        config: PluginConfig,
+        text: string,
+        label: string,
+        activeRun: ActiveVoiceAgentRun
+    ): Promise<OpenclawReplyPayload[]> {
+        const hermesApiUrl = config.hermesApiUrl || process.env.HERMES_API_URL || "http://127.0.0.1:8642";
+
+        const messages = [
+            {
+                role: "system",
+                content: config.openclawVoiceSystemPrompt ||
+                    "你是一个有用的语音助手。请用简洁的中文回答。回复要简短自然，适合语音播报。"
+            },
+            ...this.voiceContextTurns.slice(-config.voiceContextMaxTurns * 2).map(turn => ({
+                role: turn.role,
+                content: turn.text,
+            })),
+            { role: "user", content: text },
+        ];
+
+        const response = await fetch(`${hermesApiUrl}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                model: "hermes-agent",
+                messages,
+                stream: false,
+            }),
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => "");
+            throw new Error(`Hermes API error ${response.status}: ${errorBody}`);
+        }
+
+        const result = await response.json() as any;
+        const replyText = result?.choices?.[0]?.message?.content?.trim();
+
+        if (!replyText) {
+            return [];
+        }
+
+        console.log(`-> [${label}] Hermes reply: ${replyText.slice(0, 100)}...`);
+        return [{ text: replyText }];
+    }
+
     private async deliverAgentPromptViaLlmApi(
         config: PluginConfig,
         text: string,
@@ -18806,13 +18854,24 @@ class XiaoaiCloudPlugin {
         this.pendingAgentPromptCount = this.activeVoiceAgentRuns.length;
 
         try {
-            // Use direct LLM API (replaces OpenClaw Gateway)
-            const payloads = await this.deliverAgentPromptViaLlmApi(
-                config,
-                text,
-                label,
-                activeRun
-            );
+            // Try Hermes API first, fallback to direct LLM
+            let payloads: OpenclawReplyPayload[];
+            try {
+                payloads = await this.deliverAgentPromptViaHermesApi(
+                    config,
+                    text,
+                    label,
+                    activeRun
+                );
+            } catch (hermesError) {
+                console.warn(`-> [${label}] Hermes API failed, falling back to direct LLM: ${this.errorMessage(hermesError)}`);
+                payloads = await this.deliverAgentPromptViaLlmApi(
+                    config,
+                    text,
+                    label,
+                    activeRun
+                );
+            }
 
             const elapsedMs = Date.now() - startedAtMs;
             console.log(
