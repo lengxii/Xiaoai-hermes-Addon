@@ -3,7 +3,7 @@ import { execFile } from "child_process";
 import { appendFile, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { request as httpsRequest } from "https";
 import path from "path";
-import { defaultPluginStorageDir } from "./openclaw-paths.js";
+import { defaultPluginStorageDir } from "./hermes-paths.js";
 
 export type XiaomiSid = "micoapi" | "xiaomiio";
 export type XiaomiVerificationMethod = "phone" | "email";

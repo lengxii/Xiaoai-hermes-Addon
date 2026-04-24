@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
-import { defaultPluginStorageDir } from "./openclaw-paths.js";
+import { defaultPluginStorageDir } from "./hermes-paths.js";
 
 export interface PersistedCloudProfile {
     account?: string;

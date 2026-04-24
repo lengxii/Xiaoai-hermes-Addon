@@ -7,11 +7,10 @@ import { fileURLToPath } from "url";
 import JSON5 from "json5";
 import { renderConsoleAccessPage, renderConsolePage } from "./console-page.js";
 import {
-    resolveOpenclawConfigPath,
+    resolveHermesConfigPath,
     resolvePluginStorageDir,
-} from "./openclaw-paths.js";
-import { loadGatewayClientCtor } from "./openclaw-gateway-runtime.js";
-import type { GatewayClientLike } from "./openclaw-gateway-runtime.js";
+} from "./hermes-paths.js";
+// OpenClaw Gateway SDK removed — using direct HTTP API instead
 import {
     LoginDeviceCandidate,
     LoginDiscoveryPayload,
@@ -87,6 +86,7 @@ interface PluginConfig {
     openclawThinkingOff: boolean;
     openclawForceNonStreaming: boolean;
     openclawVoiceSystemPrompt: string;
+    notificationWebhookUrl?: string;
     transitionPhrases: string[];
     debugLogEnabled: boolean;
     voiceContextMaxTurns: number;
@@ -94,6 +94,9 @@ interface PluginConfig {
     wakeWordPattern: string;
     dialogWindowSeconds: number;
     audioTailPaddingMs: number;
+    llmApiUrl?: string;
+    llmApiKey?: string;
+    llmModel?: string;
 }
 
 interface DeviceContext {
@@ -2426,9 +2429,9 @@ async function readApiConfig(api: any): Promise<Record<string, any>> {
     return Object.assign({}, ...candidates.filter((item) => item && typeof item === "object"));
 }
 
-async function readOpenclawGlobalConfig(api?: any) {
+async function readHermesPluginConfig(serviceStateDir?: string) {
     try {
-        const raw = await readFile(resolveOpenclawConfigPath({ api }), "utf8");
+        const raw = await readFile(resolveHermesConfigPath({ serviceStateDir }), "utf8");
         const parsed = JSON5.parse(raw);
         return parsed && typeof parsed === "object"
             ? (parsed as Record<string, any>)
@@ -2453,7 +2456,7 @@ async function discoverGatewayBaseUrls(api: any): Promise<string[]> {
     addUrl(api?.gateway?.publicUrl);
     addUrl(api?.gateway?.url);
 
-    const globalConfig = await readOpenclawGlobalConfig(api);
+    const globalConfig = await readHermesPluginConfig();
     const gatewayConfig = globalConfig?.gateway;
     addUrl(gatewayConfig?.publicUrl);
     addUrl(gatewayConfig?.externalUrl);
@@ -2499,9 +2502,8 @@ async function resolvePluginConfig(
 ): Promise<PluginConfig> {
     const apiConfig = await readApiConfig(api);
     const env = process.env;
-    const globalConfig = await readOpenclawGlobalConfig(api);
+    const globalConfig = await readHermesPluginConfig();
     const storageDir = resolvePluginStorageDir({
-        api,
         serviceStateDir: options?.stateDir,
     });
     const defaultProfilePath = defaultStateStorePath(storageDir);
@@ -2754,6 +2756,7 @@ async function resolvePluginConfig(
 class XiaoaiCloudPlugin {
     private static sharedRecentSelfTriggeredQueries: RecentSelfTriggeredQuery[] = [];
     private readonly api: any;
+    public readonly registeredTools = new Map<string, { name: string; description: string; parameters: any; execute: (id: string, params: any) => Promise<any> }>();
     private initPromise?: Promise<void>;
     private config?: PluginConfig;
     private toolsRegistered = false;
@@ -2822,8 +2825,7 @@ class XiaoaiCloudPlugin {
     private activeVoiceAgentRuns: ActiveVoiceAgentRun[] = [];
     private lastOpenclawSpeech?: RecentOpenclawSpeech;
     private recentSelfTriggeredQueries: RecentSelfTriggeredQuery[] = [];
-    private openclawGatewayClient?: GatewayClientLike;
-    private openclawGatewayClientReady?: Promise<GatewayClientLike>;
+    // Gateway client removed — using direct HTTP API
     private notificationChannelUnavailableUntil = 0;
     private notificationChannelUnavailableMessage = "";
     private pendingGatewayRestart = false;
@@ -2861,8 +2863,8 @@ class XiaoaiCloudPlugin {
     private ffmpegAvailabilityProbe?: Promise<boolean>;
     private ffmpegAvailabilityExpiresAt = 0;
 
-    constructor(api: any) {
-        this.api = api;
+    constructor(api?: any) {
+        this.api = api || {};
     }
 
     registerTools() {
@@ -2909,7 +2911,7 @@ class XiaoaiCloudPlugin {
 
     async stopService() {
         this.stopPolling();
-        await this.stopOpenclawGatewayClient();
+        // Gateway client removed
         this.initPromise = undefined;
         this.config = undefined;
         this.accountClient = undefined;
@@ -3150,7 +3152,7 @@ class XiaoaiCloudPlugin {
                 config?.debugLogPath ||
                 path.join(
                     resolvePluginStorageDir({
-                        api: this.api,
+                        
                         serviceStateDir: this.serviceStateDir,
                     }),
                     "xiaomi-network.log"
@@ -4589,7 +4591,7 @@ class XiaoaiCloudPlugin {
             return [];
         }
 
-        const globalConfig = await readOpenclawGlobalConfig(this.api).catch(() => undefined);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir).catch(() => undefined);
         const gatewayConfig = globalConfig?.gateway;
         const customBindHost = readString(gatewayConfig?.customBindHost)?.trim().toLowerCase();
         if (customBindHost && isLoopbackHostname(customBindHost)) {
@@ -5129,7 +5131,7 @@ class XiaoaiCloudPlugin {
     private async queryOpenclawAgentModelState(
         config: PluginConfig
     ): Promise<OpenclawAgentModelState> {
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const agentId = this.resolveManagedOpenclawAgentId(config, globalConfig);
         const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
         const currentModel =
@@ -5168,7 +5170,7 @@ class XiaoaiCloudPlugin {
     private async buildConsoleOpenclawRouteState(
         config: PluginConfig
     ): Promise<ConsoleOpenclawRouteState> {
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const configuredChannels = collectConfiguredOpenclawChannels(globalConfig);
         const currentChannel =
             readString(config.openclawChannel)?.toLowerCase() ||
@@ -5407,7 +5409,7 @@ class XiaoaiCloudPlugin {
         config: PluginConfig
     ): Promise<ConsoleOpenclawWorkspaceState> {
         const agentId = readString(config.openclawAgent) || "main";
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
         const workspacePath = this.resolveOpenclawAgentWorkspacePath(
             agentId,
@@ -5444,7 +5446,7 @@ class XiaoaiCloudPlugin {
 
         let workspacePromptMigrated = false;
         let workspaceToolsMigrated = false;
-        const globalConfig = await readOpenclawGlobalConfig(this.api).catch(() => undefined);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir).catch(() => undefined);
         const agentId = this.resolveManagedOpenclawAgentId(nextConfig, globalConfig);
         const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
         const workspacePath = this.resolveOpenclawAgentWorkspacePath(
@@ -5511,7 +5513,7 @@ class XiaoaiCloudPlugin {
     }
 
     private async readOpenclawGatewayAuthState(): Promise<OpenclawGatewayAuthState> {
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const mode = readString(globalConfig?.gateway?.auth?.mode) || "token";
         const token =
             readString(globalConfig?.gateway?.auth?.token) ||
@@ -5545,7 +5547,7 @@ class XiaoaiCloudPlugin {
             };
         }
 
-        await this.runOpenclawCli(
+        await this.runCliCommand(
             [
                 config.openclawCliPath,
                 "config",
@@ -5571,7 +5573,7 @@ class XiaoaiCloudPlugin {
         }
         this.pendingGatewayRestart = true;
         setTimeout(() => {
-            void this.runOpenclawCli(
+            void this.runCliCommand(
                 [config.openclawCliPath, "gateway", "restart"],
                 reason,
                 60_000
@@ -5610,7 +5612,7 @@ class XiaoaiCloudPlugin {
             );
         }
 
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const agentsList = this.readOpenclawAgentListFromConfig(globalConfig);
         const agentIndex = Array.isArray(agentsList)
             ? agentsList.findIndex((item) => readString(item?.id) === agentId)
@@ -5632,7 +5634,7 @@ class XiaoaiCloudPlugin {
             };
         }
 
-        await this.runOpenclawCli(
+        await this.runCliCommand(
             [
                 config.openclawCliPath,
                 "config",
@@ -5661,7 +5663,7 @@ class XiaoaiCloudPlugin {
         }
 
         const config = await this.loadConfig(false);
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const agentId = this.resolveManagedOpenclawAgentId(config, globalConfig);
         const { agentsList, agentIndex, agentConfig } = this.readOpenclawAgentConfig(
             globalConfig,
@@ -5687,7 +5689,7 @@ class XiaoaiCloudPlugin {
             };
         }
 
-        await this.runOpenclawCli(
+        await this.runCliCommand(
             [
                 config.openclawCliPath,
                 "config",
@@ -7972,7 +7974,7 @@ class XiaoaiCloudPlugin {
         disableNotification?: boolean;
     }) {
         const config = await this.loadConfig(false);
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const previousChannel = readString(config.openclawChannel) || "telegram";
         const previousTarget = readString(config.openclawTo);
         const previousEnabled =
@@ -8083,7 +8085,7 @@ class XiaoaiCloudPlugin {
         }
         const config = await this.loadConfig(false);
         const agentId = readString(config.openclawAgent) || "main";
-        const globalConfig = await readOpenclawGlobalConfig(this.api);
+        const globalConfig = await readHermesPluginConfig(this.serviceStateDir);
         const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
         if (!agentConfig) {
             throw new Error(`没有找到 id 为 ${agentId} 的 OpenClaw agent。`);
@@ -11178,7 +11180,7 @@ class XiaoaiCloudPlugin {
             this.config?.storageDir ||
             (await this.loadConfig(false).catch(() => undefined))?.storageDir ||
             resolvePluginStorageDir({
-                api: this.api,
+                
                 serviceStateDir: this.serviceStateDir,
             });
         const relayDir = path.join(storageDir, "audio-relay");
@@ -18350,34 +18352,46 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private async runOpenclawCli(
+    private async runCliCommand(
         args: string[],
         label: string,
         timeoutMs = 60000
     ) {
-        const result = await this.api.runtime.system.runCommandWithTimeout(args, {
-            timeoutMs,
+        const { execFile } = await import("child_process");
+        const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
+            const child = execFile(args[0], args.slice(1), { timeout: timeoutMs }, (error, stdout, stderr) => {
+                if (error && error.killed) {
+                    reject(new Error(`Command timed out after ${timeoutMs}ms`));
+                    return;
+                }
+                resolve({
+                    code: Number(error?.code) ?? 0,
+                    stdout: stdout || "",
+                    stderr: stderr || "",
+                });
+            });
         });
+
         const stdout = readString(result.stdout) || "";
         const stderr = readString(result.stderr) || "";
 
         if (result.code !== 0) {
             throw new Error(
-                stderr.trim() || stdout.trim() || `OpenClaw CLI 退出码 ${result.code}`
+                stderr.trim() || stdout.trim() || `CLI command exited with code ${result.code}`
             );
         }
 
         const stdoutSummary = this.summarizeCliOutput(stdout);
         if (stdoutSummary && stdoutSummary !== "completed") {
-            console.log(`-> [${label}] CLI 输出: ${stdoutSummary}`);
+            console.log(`-> [${label}] CLI output: ${stdoutSummary}`);
         }
 
         const stderrSummary = this.summarizeCliOutput(stderr);
         if (stderrSummary) {
-            console.warn(`-> [${label}] CLI 警告: ${stderrSummary}`);
+            console.warn(`-> [${label}] CLI warning: ${stderrSummary}`);
         }
 
-        console.log(`-> [${label}] 已发送到 OpenClaw`);
+        console.log(`-> [${label}] Command completed`);
         return result;
     }
 
@@ -18421,152 +18435,26 @@ class XiaoaiCloudPlugin {
         );
     }
 
-    private async stopOpenclawGatewayClient() {
-        const client = this.openclawGatewayClient;
-        this.openclawGatewayClient = undefined;
-        this.openclawGatewayClientReady = undefined;
-        if (!client) {
-            return;
-        }
-        await client.stopAndWait({ timeoutMs: 5_000 }).catch(() => undefined);
+    // Gateway client methods removed — voice forwarding now uses direct LLM API
+    private async stopOpenclawGatewayClient() { /* removed */ }
+    private async ensureOpenclawGatewayClient(_config: PluginConfig): Promise<never> {
+        throw new Error("OpenClaw Gateway client removed. Use direct LLM API instead.");
+    }
+    private async runOpenclawGatewayCall<T>(_config: PluginConfig, _method: string, _params: Record<string, any>, _label: string, _options?: any): Promise<T> {
+        throw new Error("OpenClaw Gateway call removed. Use direct LLM API instead.");
     }
 
-    private async ensureOpenclawGatewayClient(config: PluginConfig) {
-        if (this.openclawGatewayClientReady) {
-            return this.openclawGatewayClientReady;
-        }
-
-        const readyPromise = (async () => {
-            const authState = await this.readOpenclawGatewayAuthState();
-            const globalConfig = authState.globalConfig;
-
-            const GatewayClient = await loadGatewayClientCtor({
-                openclawCliPath: config.openclawCliPath,
-            });
-
-            let resolveHello!: (client: GatewayClientLike) => void;
-            let rejectHello!: (error: Error) => void;
-            let settled = false;
-            const helloPromise = new Promise<GatewayClientLike>((resolve, reject) => {
-                resolveHello = resolve;
-                rejectHello = reject;
-            });
-            const settleHello = (error?: unknown) => {
-                if (settled) {
-                    return;
-                }
-                settled = true;
-                if (error) {
-                    rejectHello(error instanceof Error ? error : new Error(String(error)));
-                    return;
-                }
-                resolveHello(client);
-            };
-
-            const client = new GatewayClient({
-                url: this.resolveOpenclawGatewayWsUrl(globalConfig),
-                token: authState.token,
-                password: authState.password,
-                clientName: "gateway-client",
-                clientDisplayName: "xiaoai-cloud-plugin",
-                clientVersion: "1.0.0",
-                mode: "backend",
-                role: "operator",
-                scopes: ["operator.read", "operator.write"],
-                requestTimeoutMs: Math.max(
-                    OPENCLAW_AGENT_SUBMIT_TIMEOUT_MS,
-                    OPENCLAW_AGENT_WAIT_TIMEOUT_MS
-                ),
-                onHelloOk: () => {
-                    settleHello();
-                },
-                onConnectError: (error) => {
-                    settleHello(error);
-                },
-                onClose: (code, reason) => {
-                    if (!settled) {
-                        settleHello(
-                            new Error(
-                                `OpenClaw Gateway 连接关闭 (${code}${reason ? `: ${reason}` : ""})`
-                            )
-                        );
-                    }
-                    if (this.openclawGatewayClient === client) {
-                        this.openclawGatewayClient = undefined;
-                        this.openclawGatewayClientReady = undefined;
-                    }
-                },
-            });
-
-            this.openclawGatewayClient = client;
-            client.start();
-
-            return Promise.race([
-                helloPromise,
-                new Promise<GatewayClientLike>((_, reject) => {
-                    setTimeout(() => {
-                        reject(new Error("连接 OpenClaw Gateway 超时。"));
-                    }, 10_000);
-                }),
-            ]);
-        })().catch((error) => {
-            this.openclawGatewayClient = undefined;
-            this.openclawGatewayClientReady = undefined;
-            throw error;
-        });
-
-        this.openclawGatewayClientReady = readyPromise;
-        return readyPromise;
-    }
-
-    private async runOpenclawGatewayCall<T>(
-        config: PluginConfig,
-        method: string,
-        params: Record<string, any>,
-        label: string,
-        options?: {
-            timeoutMs?: number;
-            expectFinal?: boolean;
-        }
-    ) {
-        const timeoutMs = clamp(
-            Math.round(options?.timeoutMs ?? OPENCLAW_AGENT_SUBMIT_TIMEOUT_MS),
-            1000,
-            OPENCLAW_AGENT_WAIT_TIMEOUT_MS + 60_000
-        );
-        const execute = async (allowRetry: boolean): Promise<T> => {
-            const client = await this.ensureOpenclawGatewayClient(config);
-            try {
-                const result = await client.request<T>(method, params, {
-                    timeoutMs,
-                    expectFinal: options?.expectFinal,
-                });
-                console.log(`-> [${label}] 已发送到 OpenClaw`);
-                return result;
-            } catch (error) {
-                const message = this.errorMessage(error);
-                if (allowRetry && this.isOpenclawGatewayReconnectableError(message)) {
-                    await this.stopOpenclawGatewayClient();
-                    return execute(false);
-                }
-                throw error;
-            }
-        };
-
-        return execute(true);
-    }
-
-    private async sendOpenclawNotification(
+    private async sendNotification(
         text: string,
-        label = "OpenClaw",
+        label = "XiaoAI",
         options?: { bestEffort?: boolean }
     ) {
         const config = await this.loadConfig(false);
-        if (config.openclawNotificationsDisabled) {
+        const webhookUrl = config.notificationWebhookUrl;
+
+        if (!webhookUrl) {
+            console.log(`[XiaoAI Cloud] Notification (${label}): ${text}`);
             return false;
-        }
-        if (!config.openclawTo) {
-            throw new Error("缺少 openclawTo 配置，无法把登录入口或语音转发给 OpenClaw。");
         }
 
         if (options?.bestEffort && this.notificationChannelUnavailableUntil > Date.now()) {
@@ -18574,38 +18462,44 @@ class XiaoaiCloudPlugin {
         }
 
         try {
-            await this.runOpenclawCli(
-                [
-                    config.openclawCliPath,
-                    "message",
-                    "send",
-                    "--channel",
-                    config.openclawChannel,
-                    "--target",
-                    config.openclawTo,
-                    "--message",
-                    text
-                ],
-                label
-            );
+            const response = await fetch(webhookUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    text,
+                    label,
+                    source: "xiaoai-cloud",
+                    timestamp: new Date().toISOString(),
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`Webhook returned ${response.status}`);
+            }
+
             this.notificationChannelUnavailableUntil = 0;
             this.notificationChannelUnavailableMessage = "";
             return true;
         } catch (error) {
             const message = this.errorMessage(error);
-            if (options?.bestEffort && this.isOpenclawChannelUnavailableError(message)) {
+            if (options?.bestEffort) {
                 const shouldLog =
                     this.notificationChannelUnavailableUntil <= Date.now() ||
                     this.notificationChannelUnavailableMessage !== message;
                 this.notificationChannelUnavailableUntil = Date.now() + 60_000;
                 this.notificationChannelUnavailableMessage = message;
                 if (shouldLog) {
-                    console.warn(`[XiaoAI Cloud] ${label} 已跳过: ${message}`);
+                    console.warn(`[XiaoAI Cloud] ${label} skipped: ${message}`);
                 }
                 return false;
             }
             throw error;
         }
+    }
+
+    // Backward-compat alias
+    private async sendOpenclawNotification(text: string, label?: string, options?: { bestEffort?: boolean }) {
+        return this.sendNotification(text, label, options);
     }
 
     private async waitForVoiceAgentRun(
@@ -18823,9 +18717,69 @@ class XiaoaiCloudPlugin {
         throw lastError || new Error("OpenClaw 官方非流式接口调用失败。");
     }
 
+    private async deliverAgentPromptViaLlmApi(
+        config: PluginConfig,
+        text: string,
+        label: string,
+        activeRun: ActiveVoiceAgentRun
+    ): Promise<OpenclawReplyPayload[]> {
+        const apiUrl = config.llmApiUrl || process.env.LLM_API_URL;
+        const apiKey = config.llmApiKey || process.env.LLM_API_KEY;
+        const model = config.llmModel || process.env.LLM_MODEL || "gpt-4o-mini";
+
+        if (!apiUrl) {
+            throw new Error("LLM API URL not configured. Set llmApiUrl in config or LLM_API_URL env.");
+        }
+
+        const systemPrompt = config.openclawVoiceSystemPrompt ||
+            "You are a helpful voice assistant. Respond concisely in Chinese. Keep replies short and natural for text-to-speech.";
+
+        const messages = [
+            { role: "system", content: systemPrompt },
+            ...this.voiceContextTurns.slice(-config.voiceContextMaxTurns * 2).map(turn => ({
+                role: turn.role,
+                content: turn.text,
+            })),
+            { role: "user", content: text },
+        ];
+
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+        };
+        if (apiKey) {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+        }
+
+        const response = await fetch(`${apiUrl}/v1/chat/completions`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+                model,
+                messages,
+                max_tokens: 500,
+                temperature: 0.7,
+            }),
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => "");
+            throw new Error(`LLM API error ${response.status}: ${errorBody}`);
+        }
+
+        const result = await response.json() as any;
+        const replyText = result?.choices?.[0]?.message?.content?.trim();
+
+        if (!replyText) {
+            return [];
+        }
+
+        console.log(`-> [${label}] LLM reply: ${replyText.slice(0, 100)}...`);
+        return [{ text: replyText }];
+    }
+
     private async deliverAgentPrompt(
         text: string,
-        label = "OpenClaw",
+        label = "XiaoAI",
         options?: { sessionKey?: string }
     ) {
         const config = await this.loadConfig(false);
@@ -18836,17 +18790,13 @@ class XiaoaiCloudPlugin {
             : this.activeVoiceAgentRuns.length;
         if (queuedAhead > 0) {
             console.log(
-                `-> [${label}] 已交给 OpenClaw 官方会话队列，当前会话前方还有 ${queuedAhead} 条`
+                `-> [${label}] queued, ${queuedAhead} ahead in session`
             );
         }
 
-        const params: Record<string, any> = {
-            message: text,
-            timeout: Math.ceil(OPENCLAW_AGENT_WAIT_TIMEOUT_MS / 1000),
-            idempotencyKey: randomBytes(12).toString("hex"),
-        };
+        const idempotencyKey = randomBytes(12).toString("hex");
         const activeRun: ActiveVoiceAgentRun = {
-            id: params.idempotencyKey,
+            id: idempotencyKey,
             label,
             sessionKey,
             startedAtMs,
@@ -18855,59 +18805,20 @@ class XiaoaiCloudPlugin {
         this.activeVoiceAgentRuns.push(activeRun);
         this.pendingAgentPromptCount = this.activeVoiceAgentRuns.length;
 
-        if (config.openclawAgent) {
-            params.agentId = config.openclawAgent;
-        }
-        if (sessionKey) {
-            params.sessionKey = sessionKey;
-        }
-        if (config.openclawThinkingOff) {
-            params.thinking = "off";
-        }
         try {
-            const payloads = config.openclawForceNonStreaming
-                ? await this.deliverAgentPromptViaResponsesApi(
-                    config,
-                    text,
-                    label,
-                    activeRun
-                )
-                : await (async () => {
-                    const result = await this.runOpenclawGatewayCall<OpenclawAgentFinalResult>(
-                        config,
-                        "agent",
-                        params,
-                        label,
-                        {
-                            timeoutMs: OPENCLAW_AGENT_WAIT_TIMEOUT_MS + 10_000,
-                            expectFinal: true,
-                        }
-                    );
-                    const runId = readString(result?.runId);
-                    if (runId) {
-                        activeRun.id = runId;
-                    }
+            // Use direct LLM API (replaces OpenClaw Gateway)
+            const payloads = await this.deliverAgentPromptViaLlmApi(
+                config,
+                text,
+                label,
+                activeRun
+            );
 
-                    const elapsedMs = Date.now() - startedAtMs;
-                    const status = readString(result?.status) || "ok";
-                    if (status === "ok") {
-                        console.log(
-                            `-> [${label}] Run 已结束 | ${elapsedMs}ms | 会话: ${activeRun.sessionKey || "default"}`
-                        );
-                    } else {
-                        console.warn(
-                            `-> [${label}] Run 结束状态: ${status} | ${elapsedMs}ms | 会话: ${activeRun.sessionKey || "default"}`
-                        );
-                    }
-                    return this.normalizeOpenclawReplyPayloads(result?.result?.payloads);
-                })();
+            const elapsedMs = Date.now() - startedAtMs;
+            console.log(
+                `-> [${label}] LLM call completed | ${elapsedMs}ms | session: ${activeRun.sessionKey || "default"}`
+            );
 
-            if (config.openclawForceNonStreaming) {
-                const elapsedMs = Date.now() - startedAtMs;
-                console.log(
-                    `-> [${label}] 非流式请求已结束 | ${elapsedMs}ms | 会话: ${activeRun.sessionKey || "default"}`
-                );
-            }
             await this.handleOpenclawFinalPayloads(activeRun, payloads);
             if (!activeRun.firstSpeakObserved && activeRun.sessionKey === this.openclawVoiceSessionKey) {
                 this.waitingForResponse = false;
@@ -18922,7 +18833,7 @@ class XiaoaiCloudPlugin {
         }
     }
 
-    private forwardToOpenclaw(text: string, options?: { renewVoiceSession?: boolean }) {
+    private forwardToLlm(text: string, options?: { renewVoiceSession?: boolean }) {
         const sessionKey = this.resolveOpenclawVoiceSessionKey(Boolean(options?.renewVoiceSession));
         const sessionNotice = this.buildVoiceSessionNotice(options);
         const contextPrompt = this.buildVoiceContextPrompt(sessionKey);
@@ -19093,7 +19004,7 @@ class XiaoaiCloudPlugin {
             if (forwardIssued || !this.waitingForResponse) {
                 return false;
             }
-            this.forwardToOpenclaw(text, options);
+            this.forwardToLlm(text, options);
             forwardIssued = true;
             void this.appendDebugTrace("conversation_intercept_forward_issued", {
                 deviceId,
@@ -19150,8 +19061,16 @@ class XiaoaiCloudPlugin {
         });
     }
 
+    private registerTool(tool: { name: string; description: string; parameters: any; execute: (id: string, params: any) => Promise<any> }) {
+        this.registeredTools.set(tool.name, tool);
+        // Also register via OpenClaw API if available
+        if (typeof this.api?.registerTool === "function") {
+            this.api.registerTool(tool);
+        }
+    }
+
     private registerPluginTools() {
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_speak",
             description: "通过本地小爱音箱播报语音内容。参数 text 是你要大声说出的中文文本。",
             parameters: schemaObject({
@@ -19235,7 +19154,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_play_audio",
             description:
                 "通过小爱音箱播放音频。支持可直接访问的 http/https URL，也支持插件运行机器上的本地绝对路径（含 file://）。插件会先在本地尽量标准化为统一 MP3 音频，再交给小爱播放。",
@@ -19287,7 +19206,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_tts_bridge",
             description:
                 "使用 OpenClaw 官方 runtime.tts 把文本先合成为音频，再通过小爱音箱播放。适合想走统一 TTS 音频链路，而不是直接文本播报的场景。",
@@ -19366,7 +19285,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_set_volume",
             description: "设置小爱音箱播放音量(0-100)。只改音量数值，不会自动切换播放静音。",
             parameters: schemaObject({
@@ -19391,7 +19310,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_set_playback_mute",
             description:
                 "切换小爱音箱的播放静音开关。它影响音频播放链路，不等同于对话播报音量。",
@@ -19442,7 +19361,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_get_volume",
             description: "获取小爱音箱当前播放音量、播放静音状态和设备状态。",
             parameters: schemaObject({}),
@@ -19470,7 +19389,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_new_session",
             description:
                 "重置小爱语音入口的上下文，并让下一次通过小爱进入的 OpenClaw 对话切换到新的会话。",
@@ -19499,7 +19418,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_wake_up",
             description: "远程唤醒小爱音箱，效果等同于说唤醒词。",
             parameters: schemaObject({}),
@@ -19523,7 +19442,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_execute",
             description: "向小爱音箱发送一条执行指令，由小爱本地系统执行。",
             parameters: schemaObject({
@@ -19550,7 +19469,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_set_mode",
             description:
                 "切换插件工作模式。\n" +
@@ -19598,7 +19517,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_set_wake_word",
             description:
                 "修改插件当前使用的唤醒词规则。pattern 可以直接写固定短语，也可以写正则源码；如果只是普通文字，插件会自动按字面匹配。",
@@ -19629,7 +19548,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_get_status",
             description: "获取当前插件完整状态，包括设备、模式、登录入口与会话监听状态。",
             parameters: schemaObject({}),
@@ -19704,7 +19623,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_login_begin",
             description: "生成新的小米登录入口，并通过 OpenClaw 再次发给用户。",
             parameters: schemaObject({}),
@@ -19722,7 +19641,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_login_status",
             description: "查看当前登录会话状态。如果还没有登录会话，会自动生成一个。",
             parameters: schemaObject({}),
@@ -19762,7 +19681,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_console_open",
             description: "生成并转发小爱控制台后台链接，便于查看对话记录、事件流和直接向小爱发消息。",
             parameters: schemaObject({}),
@@ -19792,7 +19711,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_run_calibration",
             description:
                 "运行小爱插件的延迟校准。mode=all 会顺序完成音频时序校准和对话拦截校准；请求单项时，如果当前设备另一项仍未校准，也会自动补跑。对话校准会发送无副作用测试问句，测试期间音箱可能真实出声。",
@@ -19863,7 +19782,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_set_dialog_window",
             description: "设置唤醒模式下的免唤醒对话窗口时长（秒）。",
             parameters: schemaObject({
@@ -19881,7 +19800,7 @@ class XiaoaiCloudPlugin {
             },
         });
 
-        this.api.registerTool({
+        this.registerTool({
             name: "xiaoai_update_settings",
             description:
                 "批量修改小爱插件的高级设置。适合调整通知渠道、OpenClaw 模型、xiaoai agent 上下文窗口、thinking、非流式、workspace 提示文件、过渡播报词和调试日志等控制台配置。",
@@ -20144,6 +20063,6 @@ class XiaoaiCloudPlugin {
     }
 }
 
-export function createXiaoaiCloudPlugin(api: any) {
+export function createXiaoaiCloudPlugin(api?: any) {
     return new XiaoaiCloudPlugin(api);
 }

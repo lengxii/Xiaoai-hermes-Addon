@@ -1,0 +1,89 @@
+{
+  "id": "hermes-plugin-xiaoai-cloud",
+  "name": "XiaoAI Cloud Plugin for Hermes",
+  "description": "Hermes Agent 插件：直连小米账号/米家云的小爱音箱语音播报与唤醒拦截。",
+  "version": "2.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "account": {
+        "type": "string",
+        "description": "小米账号；不填也可以直接在控制台里登录。"
+      },
+      "password": {
+        "type": "string",
+        "description": "小米密码（可选，建议通过控制台登录）。"
+      },
+      "serverCountry": {
+        "type": "string",
+        "description": "云端区域，默认 cn。",
+        "enum": ["cn", "de", "i2", "ru", "sg", "us"]
+      },
+      "hardware": {
+        "type": "string",
+        "description": "设备硬件型号，例如 L05C。"
+      },
+      "speakerName": {
+        "type": "string",
+        "description": "米家中的设备名称，用于在多台小爱中精确定位。"
+      },
+      "miDid": {
+        "type": "string",
+        "description": "米家设备 DID。"
+      },
+      "minaDeviceId": {
+        "type": "string",
+        "description": "小爱云端 deviceID。"
+      },
+      "pollIntervalMs": {
+        "type": "integer",
+        "description": "会话轮询间隔毫秒，默认 320。"
+      },
+      "wakeWordPattern": {
+        "type": "string",
+        "description": "唤醒词规则（正则）。默认匹配'小虾/小瞎/小侠/小下'等。"
+      },
+      "dialogWindowSeconds": {
+        "type": "integer",
+        "description": "唤醒模式下免唤醒对话窗口时长，单位秒，默认 30。"
+      },
+      "llmApiUrl": {
+        "type": "string",
+        "description": "OpenAI 兼容的 LLM API 地址（必填）。"
+      },
+      "llmApiKey": {
+        "type": "string",
+        "description": "LLM API Key（可选，如果 API 需要认证）。"
+      },
+      "llmModel": {
+        "type": "string",
+        "description": "使用的模型名称，默认 gpt-4o-mini。"
+      },
+      "notificationWebhookUrl": {
+        "type": "string",
+        "description": "通知 webhook URL（可选）。"
+      },
+      "openclawVoiceSystemPrompt": {
+        "type": "string",
+        "description": "语音助手系统提示词。"
+      },
+      "voiceContextMaxTurns": {
+        "type": "integer",
+        "description": "每次转发时携带的最近上下文轮数，默认 6。"
+      },
+      "voiceContextMaxChars": {
+        "type": "integer",
+        "description": "每次转发时携带的最近上下文总字符预算，默认 1400。"
+      },
+      "transitionPhrases": {
+        "type": "array",
+        "description": "拦截成功后的过渡播报词列表。",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": ["llmApiUrl"]
+  }
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=XiaoAI Cloud Plugin for Hermes Agent
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Xiaoai-Claw-Addon
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=XIAOAI_PORT=17890
+Environment=XIAOAI_HOST=0.0.0.0
+# Uncomment and set these:
+# Environment=LLM_API_URL=https://api.openai.com
+# Environment=LLM_API_KEY=sk-...
+# Environment=LLM_MODEL=gpt-4o-mini
+
+[Install]
+WantedBy=multi-user.target
