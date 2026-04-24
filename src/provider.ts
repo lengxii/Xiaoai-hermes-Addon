@@ -6074,24 +6074,18 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private async handleConsoleApiRoute(
+    async handleConsoleApiRoute(
         config: PluginConfig,
         request: any,
         response: any,
         requestUrl: URL,
         matchedPath: string
     ) {
-        const auth = await this.resolveConsoleAuthorization(request, requestUrl);
-        if (!auth.authorized) {
-            sendJson(response, 401, {
-                error: "控制台访问口令无效，请使用插件提供的后台完整链接重新进入。",
-            });
-            return true;
-        }
-
+        // Standalone mode: skip auth check
+        const auth = { expected: "", fromHeader: "", fromQuery: "", fromCookie: "", authorized: true };
         const requestMethod = (request.method || "GET").toUpperCase();
-        const headerAuthorized = safeTokenEquals(auth.expected, auth.fromHeader);
-        const queryAuthorized = safeTokenEquals(auth.expected, auth.fromQuery);
+        const headerAuthorized = true;
+        const queryAuthorized = true;
         if (
             requestMethod === "POST" &&
             !headerAuthorized &&
@@ -7011,20 +7005,7 @@ class XiaoaiCloudPlugin {
         }
 
         if (matchedPath === "/" || matchedPath === "/console" || matchedPath === "/console/") {
-            const auth = await this.resolveConsoleAuthorization(request, requestUrl);
-            if (!auth.authorized) {
-                sendHtml(
-                    response,
-                    renderConsoleAccessPage({
-                        assetBasePath: consoleAssetBasePath(config.authRoutePath),
-                        hint: auth.fromQuery
-                            ? "访问口令无效。请重新使用插件生成的后台完整链接打开。"
-                            : undefined,
-                    })
-                );
-                return true;
-            }
-
+            // Standalone mode: skip auth, always allow access
             this.setConsoleAccessCookie(response, request, config);
             sendHtml(
                 response,
